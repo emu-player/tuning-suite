@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+:root {
+  --bg-base: #06080b;
+  --bg-surface: #0d1117;
+  --bg-elevated: #151b23;
+  --bg-hover: #1f2631;
+  --border: #212830;
+  --border-bright: #30363d;
+  --accent: #f95716;
+  --accent-dim: rgba(249, 87, 22, 0.12);
+  --accent-glow: rgba(249, 87, 22, 0.25);
+  --cyan: #00f0ff;
+  --cyan-glow: rgba(0, 240, 255, 0.15);
+  --ok: #10b981;
+  --warn: #f59e0b;
+  --err: #ef4444;
+  --text-primary: #f0f6fc;
+  --text-secondary: #8b949e;
+  --text-muted: #484f58;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+@theme {
+  --color-brand-base: var(--bg-base);
+  --color-brand-surface: var(--bg-surface);
+  --color-brand-elevated: var(--bg-elevated);
+  --color-brand-hover: var(--bg-hover);
+  --color-brand-border: var(--border);
+  --color-brand-border-bright: var(--border-bright);
+  --color-brand-accent: var(--accent);
+  --color-brand-accent-glow: var(--accent-glow);
+  --color-brand-cyan: var(--cyan);
+  --color-brand-cyan-glow: var(--cyan-glow);
+  --color-brand-ok: var(--ok);
+  --color-brand-warn: var(--warn);
+  --color-brand-err: var(--err);
+  
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { 
+  height: 100%; 
+  background-color: var(--bg-base); 
+  color: var(--text-primary); 
+  -webkit-font-smoothing: antialiased; 
+  font-family: var(--font-sans);
+}
+
+/* Scrollbar di precisione neon-tech */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-base); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; border: 1px solid var(--border-bright); }
+::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* Pattern di sfondo diagnostico micro-grid stile oscilloscopio */
+.bg-oscilloscope {
+  background-image: 
+    linear-gradient(rgba(56, 189, 248, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(56, 189, 248, 0.03) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+/* Carbon weave effect */
+.bg-carbon {
+  background: 
+    linear-gradient(27deg, #0d1017 5px, transparent 5px) 0 5px,
+    linear-gradient(207deg, #0d1017 5px, transparent 5px) 10px 0,
+    linear-gradient(27deg, #121620 5px, transparent 5px) 0 10px,
+    linear-gradient(207deg, #121620 5px, transparent 5px) 10px 5px,
+    linear-gradient(90deg, #090c11 10px, transparent 10px),
+    linear-gradient(#0a0d14 25%, #05070a 25%, #05070a 50%, transparent 50%, transparent 75%, #0e121a 75%, #0e121a);
+  background-size: 20px 20px;
+}
