@@ -1,0 +1,97 @@
+# ══════════════════════════════════════════════════════════════════
+#  .gitignore — viboo-pet  (Next.js 14 · pnpm · Vercel · Docker)
+# ══════════════════════════════════════════════════════════════════
+
+# ─── macOS ────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+Icon?
+**/.DS_Store
+
+# ─── Next.js build output ─────────────────────────────────────────
+.next/
+out/
+build/
+
+# ─── Next.js cache ────────────────────────────────────────────────
+.next/cache/
+tsconfig.tsbuildinfo
+
+# ─── Node / pnpm ──────────────────────────────────────────────────
+node_modules/
+.pnpm-store/
+.pnpm-debug.log*
+
+# ─── Log files ────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─── Environment — MAI committare segreti ─────────────────────────
+.env
+.env.*
+!.env.example
+!.env.test
+
+# ─── Log di runtime ───────────────────────────────────────────────
+*.log
+logs/
+*.pid
+*.seed
+*.pid.lock
+
+# ─── Coverage & test ──────────────────────────────────────────────
+coverage/
+.nyc_output/
+*.lcov
+
+# ─── Vercel ───────────────────────────────────────────────────────
+.vercel/
+
+# ─── Docker ───────────────────────────────────────────────────────
+# Il Dockerfile va in repo; ignora solo artefatti locali Docker
+.dockerignore.local
+
+# ─── Editor & IDE ─────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.swp
+*.swo
+.history/
+
+# ─── TypeScript ───────────────────────────────────────────────────
+*.tsbuildinfo
+
+# ─── Misc ─────────────────────────────────────────────────────────
+*.pem
+.cache/
+tmp/
+temp/
+.tmp/
+# Stripe config (contiene chiavi segrete)
+admin/stripe.json
+
+# Image uploads (runtime)
+public/uploads/*.webp
+public/uploads/**/*.webp
+.env.local
+
+# ── Backup cartelle generate dagli script di upgrade (non tracciare in git) ──
+.bak*/
+*.bak
+
+# SQLite migration lock file (generato a runtime)
+prisma/.db-migrate.lock
+.DS_Store
