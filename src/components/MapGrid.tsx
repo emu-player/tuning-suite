@@ -24,11 +24,16 @@ export default function MapGrid() {
   const [mathErr, setMathErr] = useState<string | null>(null);
   const [show3d, setShow3d] = useState(true);
   
-  // Parametri di rotazione della visualizzazione 3D
-  const [rotX, setRotX] = useState(-0.5);
-  const [rotY, setRotY] = useState(0.6);
+  // Riferimenti mutabili per rotazione e inerzia (ottimizzati per evitare re-render ricorsivi)
+  const rotXRef = useRef(-0.5);
+  const rotYRef = useRef(0.6);
   const isDragging3d = useRef(false);
+  const isHovered3d = useRef(false);
   const dragStart3d = useRef({ x: 0, y: 0 });
+
+  // Parametri fisici della rotazione automatica
+  const targetRotationSpeed = useRef(0.0035); // Velocità di crociera (radianti per frame)
+  const currentRotationSpeed = useRef(0.0035); // Velocità istantanea corrente interpolata
 
   const map = maps.find((m) => m.mapId === activeMapId);
   const dragStart = useRef<{ col: number; row: number } | null>(null);
@@ -45,37 +50,53 @@ export default function MapGrid() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [clearSelection]);
 
-  // Aggiornamento del grafico 3D Canvas
+  // Ciclo di animazione ad alte prestazioni basato su requestAnimationFrame
   useEffect(() => {
     if (!map || !show3d || !canvasRef.current) return;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const width = canvas.width;
-    const height = canvas.height;
-    ctx.clearRect(0, 0, width, height);
+    let animationFrameId: number;
 
-    const cellMap = new Map(map.cells.map(c => [`${c.col},${c.row}`, c.physical]));
-    const getVal = (col: number, row: number) => {
-      const d = pendingDeltas.get(`${col},${row}`);
-      return d ? d.newPhysical : (cellMap.get(`${col},${row}`) ?? 0);
-    };
+    const renderLoop = () => {
+      // 1. Calcolo dinamico dello smorzamento (Inerzia / Lerp)
+      // Se l'utente sta interagendo (hover o dragging), la velocità target è 0. Altrimenti è la velocità nominale.
+      const isInteracting = isHovered3d.current || isDragging3d.current;
+      const targetSpeed = isInteracting ? 0 : targetRotationSpeed.current;
+      
+      // Interpolazione lineare per un arresto e un riavvio vellutati
+      currentRotationSpeed.current += (targetSpeed - currentRotationSpeed.current) * 0.08;
 
-    const rows = map.rows;
-    const cols = map.cols;
-
-    const rawValues: number[] = [];
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        rawValues.push(getVal(c, r));
+      // Aggiorna l'angolo di imbardata (Y) solo quando non si sta trascinando manualmente
+      if (!isDragging3d.current) {
+        rotYRef.current += currentRotationSpeed.current;
       }
-    }
-    const minVal = Math.min(...rawValues);
-    const maxVal = Math.max(...rawValues);
-    const range = maxVal - minVal || 1;
 
-    const drawGrid3D = () => {
+      // 2. Rendering del frame
+      const width = canvas.width;
+      const height = canvas.height;
+      ctx.clearRect(0, 0, width, height);
+
+      const cellMap = new Map(map.cells.map(c => [`${c.col},${c.row}`, c.physical]));
+      const getVal = (col: number, row: number) => {
+        const d = pendingDeltas.get(`${col},${row}`);
+        return d ? d.newPhysical : (cellMap.get(`${col},${row}`) ?? 0);
+      };
+
+      const rows = map.rows;
+      const cols = map.cols;
+
+      const rawValues: number[] = [];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          rawValues.push(getVal(c, r));
+        }
+      }
+      const minVal = Math.min(...rawValues);
+      const maxVal = Math.max(...rawValues);
+      const range = maxVal - minVal || 1;
+
       ctx.lineWidth = 1.2;
       const scaleX = (width * 0.45) / cols;
       const scaleY = (height * 0.45) / rows;
@@ -83,6 +104,9 @@ export default function MapGrid() {
 
       const cx = width / 2;
       const cy = height / 2 + 30;
+
+      const currentRotY = rotYRef.current;
+      const currentRotX = rotXRef.current;
 
       const vertices: { x: number; y: number; z: number; col: number; row: number; val: number }[][] = [];
       for (let r = 0; r < rows; r++) {
@@ -94,12 +118,12 @@ export default function MapGrid() {
           const nz = (val - minVal) / range - 0.5;
 
           // Rotazione Y (sinistra-destra)
-          let x1 = nx * Math.cos(rotY) - nz * Math.sin(rotY);
-          let z1 = nx * Math.sin(rotY) + nz * Math.cos(rotY);
+          let x1 = nx * Math.cos(currentRotY) - nz * Math.sin(currentRotY);
+          let z1 = nx * Math.sin(currentRotY) + nz * Math.cos(currentRotY);
 
           // Rotazione X (alto-basso)
-          let y1 = ny * Math.cos(rotX) - z1 * Math.sin(rotX);
-          let z2 = ny * Math.sin(rotX) + z1 * Math.cos(rotX);
+          let y1 = ny * Math.cos(currentRotX) - z1 * Math.sin(currentRotX);
+          let z2 = ny * Math.sin(currentRotX) + z1 * Math.cos(currentRotX);
 
           const px = cx + x1 * scaleX * cols * 0.8;
           const py = cy + y1 * scaleY * rows * 0.8 - (nz + 0.5) * scaleZ;
@@ -140,10 +164,16 @@ export default function MapGrid() {
           ctx.stroke();
         }
       }
+
+      animationFrameId = requestAnimationFrame(renderLoop);
     };
 
-    drawGrid3D();
-  }, [map, show3d, rotX, rotY, pendingDeltas]);
+    renderLoop();
+
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+    };
+  }, [map, show3d, pendingDeltas]);
 
   // Schermata di attesa (Stato Idle)
   if (status === 'idle') {
@@ -239,22 +269,29 @@ export default function MapGrid() {
     setMathInput('');
   };
 
-  const handle3DMouseDown = (e: MouseEvent) => {
+  // Drag 3D ottimizzato direttamente sul nodo DOM (Nessun repaint forzato dell'intera griglia di React)
+  const handle3DMouseDown = (e: MouseEvent<HTMLCanvasElement>) => {
     isDragging3d.current = true;
     dragStart3d.current = { x: e.clientX, y: e.clientY };
+    if (canvasRef.current) {
+      canvasRef.current.style.cursor = 'grabbing';
+    }
   };
 
-  const handle3DMouseMove = (e: MouseEvent) => {
+  const handle3DMouseMove = (e: MouseEvent<HTMLCanvasElement>) => {
     if (!isDragging3d.current) return;
     const dx = e.clientX - dragStart3d.current.x;
     const dy = e.clientY - dragStart3d.current.y;
     dragStart3d.current = { x: e.clientX, y: e.clientY };
-    setRotY((prev) => prev + dx * 0.012);
-    setRotX((prev) => Math.max(-1.4, Math.min(0.2, prev + dy * 0.012)));
+    rotYRef.current += dx * 0.012;
+    rotXRef.current = Math.max(-1.4, Math.min(0.2, rotXRef.current + dy * 0.012));
   };
 
   const handle3DMouseUp = () => {
     isDragging3d.current = false;
+    if (canvasRef.current) {
+      canvasRef.current.style.cursor = isHovered3d.current ? 'grab' : 'default';
+    }
   };
 
   const cellSize = 56;
@@ -441,8 +478,12 @@ export default function MapGrid() {
                 onMouseDown={handle3DMouseDown}
                 onMouseMove={handle3DMouseMove}
                 onMouseUp={handle3DMouseUp}
-                onMouseLeave={handle3DMouseUp}
-                className={`transition-transform duration-75 ${isDragging3d.current ? 'cursor-grabbing' : 'cursor-grab'}`}
+                onMouseEnter={() => { isHovered3d.current = true; }}
+                onMouseLeave={() => { 
+                  isHovered3d.current = false; 
+                  handle3DMouseUp(); 
+                }}
+                className="transition-transform duration-75 cursor-grab"
               />
             </div>
 
