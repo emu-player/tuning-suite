@@ -1,28 +1,69 @@
 import type { ChecksumBlockDefinition } from '@/types/calibration';
 import { Endianness } from '@/types/calibration';
 
-function reflect8(val: number): number {
+/**
+ * Tabella statica pre-calcolata per la riflessione rapida a 8-bit.
+ */
+const REFLECT_8_TABLE = new Uint8Array(256);
+for (let i = 0; i < 256; i++) {
   let res = 0;
-  for (let i = 0; i < 8; i++) {
-    if ((val & (1 << i)) !== 0) {
-      res |= (1 << (7 - i));
+  for (let j = 0; j < 8; j++) {
+    if ((i & (1 << j)) !== 0) {
+      res |= (1 << (7 - j));
     }
   }
-  return res;
-}
-
-function reflect32(val: number): number {
-  let res = 0;
-  for (let i = 0; i < 32; i++) {
-    if ((val & (1 << i)) !== 0) {
-      res |= (1 << (31 - i));
-    }
-  }
-  return res >>> 0;
+  REFLECT_8_TABLE[i] = res;
 }
 
 /**
- * Calcola il valore di checksum CRC-32 con polinomi parametrici e riflessioni.
+ * Cache globale delle tabelle di lookup CRC indicizzate per polinomio.
+ */
+const crcTables = new Map<number, Uint32Array>();
+
+/**
+ * Genera o recupera dalla cache la tabella di lookup per il calcolo CRC a 32 bit.
+ */
+function getCrcTable(poly: number): Uint32Array {
+  let table = crcTables.get(poly);
+  if (!table) {
+    table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let crc = i << 24;
+      for (let j = 0; j < 8; j++) {
+        if ((crc & 0x80000000) !== 0) {
+          crc = ((crc << 1) ^ poly) >>> 0;
+        } else {
+          crc = (crc << 1) >>> 0;
+        }
+      }
+      table[i] = crc;
+    }
+    crcTables.set(poly, table);
+  }
+  return table;
+}
+
+/**
+ * Esegue la riflessione speculare a 8 bit in tempo costante O(1).
+ */
+export function reflect8(val: number): number {
+  return REFLECT_8_TABLE[val & 0xff]!;
+}
+
+/**
+ * Esegue la riflessione speculare a 32 bit senza l'ausilio di cicli iterativi.
+ */
+export function reflect32(val: number): number {
+  let x = val;
+  x = (((x & 0xaaaaaaaa) >>> 1) | ((x & 0x55555555) << 1)) >>> 0;
+  x = (((x & 0xcccccccc) >>> 2) | ((x & 0x33333333) << 2)) >>> 0;
+  x = (((x & 0xf0f0f0f0) >>> 4) | ((x & 0x0f0f0f0f) << 4)) >>> 0;
+  x = (((x & 0xff00ff00) >>> 8) | ((x & 0x00ff00ff) << 8)) >>> 0;
+  return ((x >>> 16) | (x << 16)) >>> 0;
+}
+
+/**
+ * Calcola il valore di checksum CRC-32 con polinomi parametrici e riflessioni ad alte prestazioni.
  */
 export function calculateCustomCrc32(
   view: DataView,
@@ -34,21 +75,19 @@ export function calculateCustomCrc32(
   refIn: boolean = true,
   refOut: boolean = true
 ): number {
+  const u8 = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
   let crc = initXor;
+  const table = getCrcTable(poly);
+
   for (let i = start; i < end; i++) {
-    let byte = view.getUint8(i);
+    let byte = u8[i]!;
     if (refIn) {
-      byte = reflect8(byte);
+      byte = REFLECT_8_TABLE[byte]!;
     }
-    crc = crc ^ (byte << 24);
-    for (let bit = 0; bit < 8; bit++) {
-      if ((crc & 0x80000000) !== 0) {
-        crc = ((crc << 1) ^ poly) >>> 0;
-      } else {
-        crc = (crc << 1) >>> 0;
-      }
-    }
+    const temp = ((crc >>> 24) ^ byte) & 0xff;
+    crc = (table[temp]! ^ (crc << 8)) >>> 0;
   }
+
   if (refOut) {
     crc = reflect32(crc);
   }
@@ -66,40 +105,50 @@ export class ChecksumEngine {
   }
 
   /**
-   * Scansione euristica e patching del sistema di protezione crittografica TPROT.
-   * Identifica la sequenza di sblocco della firma RSA a 2048/4096 bit all'avvio e la bypassa.
+   * Scansione ottimizzata tramite algoritmo Boyer-Moore-Horspool e patching del sistema TPROT.
    */
   public applyTprotBypass(buffer: ArrayBuffer): { patched: boolean; offset: number } {
     const u8 = new Uint8Array(buffer);
     
-    // Pattern di istruzioni Assembly rappresentative per sblocco firma Bootloader TriCore Aurix
     const targetPattern = [0x3C, 0xD4, 0x07, 0x00, 0x1F, 0x80, 0x00, 0x10];
     const patchPattern  = [0x3C, 0xD4, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00];
 
+    const len = u8.length;
+    const patLen = targetPattern.length;
+    if (len < patLen) {
+      return { patched: false, offset: -1 };
+    }
+
+    // Inizializzazione della tabella degli spostamenti BMH (Bad Character Shift)
+    const shiftTable = new Int32Array(256);
+    for (let i = 0; i < 256; i++) {
+      shiftTable[i] = patLen;
+    }
+    for (let i = 0; i < patLen - 1; i++) {
+      shiftTable[targetPattern[i]!] = patLen - 1 - i;
+    }
+
     let foundOffset = -1;
-    for (let i = 0; i <= u8.length - targetPattern.length; i++) {
+    let skip = 0;
+
+    // Ricerca rapida con salti multipli nel buffer binario [1]
+    while (len - skip >= patLen) {
       let match = true;
-      for (let j = 0; j < targetPattern.length; j++) {
-        const val = u8[i + j];
-        const target = targetPattern[j];
-        if (val === undefined || target === undefined || val !== target) {
+      for (let i = patLen - 1; i >= 0; i--) {
+        if (u8[skip + i] !== targetPattern[i]) {
           match = false;
           break;
         }
       }
       if (match) {
-        foundOffset = i;
+        foundOffset = skip;
         break;
       }
+      skip += shiftTable[u8[skip + patLen - 1]!]!;
     }
 
     if (foundOffset !== -1) {
-      for (let j = 0; j < patchPattern.length; j++) {
-        const patchVal = patchPattern[j];
-        if (patchVal !== undefined) {
-          u8[foundOffset + j] = patchVal;
-        }
-      }
+      u8.set(patchPattern, foundOffset);
       return { patched: true, offset: foundOffset };
     }
 
@@ -111,6 +160,7 @@ export class ChecksumEngine {
    */
   public applyBlocks(buffer: ArrayBuffer, blockIds: string[]): void {
     const view = new DataView(buffer);
+    const u8 = new Uint8Array(buffer);
     const resolvedIds = this.resolveCalculationOrder(blockIds);
 
     for (const id of resolvedIds) {
@@ -121,8 +171,12 @@ export class ChecksumEngine {
 
       if (block.strategy === 'additive16twos') {
         let sum = 0;
-        for (let i = block.regionStart; i < block.regionEnd; i++) {
-          sum = (sum + view.getUint8(i)) & 0xFFFF;
+        const start = block.regionStart;
+        const end = block.regionEnd;
+        
+        // Ottimizzazione: accesso diretto all'array tipizzato ad alte prestazioni
+        for (let i = start; i < end; i++) {
+          sum = (sum + u8[i]!) & 0xFFFF;
         }
         checksum = ((~sum + 1) & 0xFFFF);
       } 
@@ -174,19 +228,30 @@ export class ChecksumEngine {
     }
   }
 
+  /**
+   * Risolve l'ordine di calcolo applicando l'ordinamento topologico ed evitando riferimenti circolari.
+   */
   private resolveCalculationOrder(blockIds: string[]): string[] {
     const list: string[] = [];
     const visited = new Set<string>();
+    const visiting = new Set<string>();
 
     const visit = (id: string) => {
+      if (visiting.has(id)) {
+        throw new Error(`Circular dependency detected in ChecksumEngine at block: "${id}"`);
+      }
       if (visited.has(id)) return;
-      visited.add(id);
+
+      visiting.add(id);
 
       for (const [otherId, otherBlock] of this.blocks.entries()) {
         if (otherBlock.parentBlockId === id) {
           visit(otherId);
         }
       }
+
+      visiting.delete(id);
+      visited.add(id);
       list.push(id);
     };
 
