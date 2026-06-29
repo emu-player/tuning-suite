@@ -72,25 +72,20 @@ export const useSession = create<SessionState>((set, get) => ({
       if (driverFile) formData.append('driver', driverFile);
       
       const res = await fetch('/api/parse-map', { method: 'POST', body: formData });
-      if (!res.ok) throw new Error('Fallito il parsing della mappa iniziale');
-      const firstParsedMap: ParsedMap = await res.json();
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Fallito il parsing delle mappe di calibrazione');
+      }
+      
+      const loadedMaps: ParsedMap[] = await res.json();
 
-      const loadedMaps: ParsedMap[] = [firstParsedMap];
-
-      if (!driverFile) {
-        const mapList = ['torque_limiter', 'boost_target', 'egr_duty_cycle'];
-        for (const mapId of mapList) {
-          const fd = new FormData();
-          fd.append('file', file);
-          fd.append('mapId', mapId);
-          const mapRes = await fetch('/api/parse-map', { method: 'POST', body: fd });
-          if (mapRes.ok) loadedMaps.push(await mapRes.json());
-        }
+      if (!Array.isArray(loadedMaps) || loadedMaps.length === 0) {
+        throw new Error('Nessuna mappa valida estratta dal file binario.');
       }
 
       set((s) => ({
         maps: loadedMaps,
-        activeMapId: firstParsedMap.mapId,
+        activeMapId: loadedMaps[0]?.mapId || null,
         status: 'ready',
         checksumOk: true,
         odaViolations: [],

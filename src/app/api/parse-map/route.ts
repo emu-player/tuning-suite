@@ -15,7 +15,6 @@ export async function POST(req: NextRequest) {
     const formData = await req.formData();
     const file = formData.get('file');
     const driver = formData.get('driver');
-    const mapId = formData.get('mapId');
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: 'Nessun file binario ricevuto.' }, { status: 400 });
@@ -39,36 +38,47 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Nessun driver valido estratto o compatibile.' }, { status: 422 });
     }
 
-    const requestedMap = typeof mapId === 'string'
-      ? (targetDefinitions.find(m => m.id === mapId) || targetDefinitions[0])
-      : targetDefinitions[0];
+    const parser = new BinaryParser(buffer);
+    const parsedMaps: ParsedMap[] = [];
 
-    if (!requestedMap) {
-      return NextResponse.json({ error: 'Mappa richiesta non trovata.' }, { status: 404 });
+    // Limit to 100 maps maximum to avoid payload overflow in massive definition files
+    const maxMaps = Math.min(targetDefinitions.length, 100);
+
+    for (let i = 0; i < maxMaps; i++) {
+      const def = targetDefinitions[i];
+      if (!def) continue;
+
+      try {
+        const cells = parser.parseMap(def);
+
+        // Session ID cryptographic generation
+        const nonce = randomBytes(16).toString('hex');
+        const opaqueId = createHash('sha256').update(`${def.id}:${nonce}`).digest('hex').slice(0, 32);
+
+        // Stateless caching on local disk
+        await FileCache.saveSession(opaqueId, buffer, def);
+
+        parsedMaps.push({
+          mapId: opaqueId,
+          label: def.label,
+          unit:  def.unit,
+          cols:  def.cols,
+          rows:  def.rows,
+          cells,
+          xAxis: def.xAxis,
+          yAxis: def.yAxis
+        });
+      } catch (err) {
+        // Skip individual maps that fail parser constraints (e.g., OOB)
+        console.error(`Skipping map: ${def.label}`, err);
+      }
     }
 
-    const parser = new BinaryParser(buffer);
-    const cells = parser.parseMap(requestedMap);
+    if (parsedMaps.length === 0) {
+      return NextResponse.json({ error: 'Impossibile decodificare alcuna mappa valida.' }, { status: 422 });
+    }
 
-    // Generazione ID Sessione Criptografico O(1)
-    const nonce = randomBytes(16).toString('hex');
-    const opaqueId = createHash('sha256').update(`${requestedMap.id}:${nonce}`).digest('hex').slice(0, 32);
-
-    // Persistenza Stateless su Disco Locale
-    await FileCache.saveSession(opaqueId, buffer, requestedMap);
-
-    const parsedMap: ParsedMap = {
-      mapId: opaqueId,
-      label: requestedMap.label,
-      unit:  requestedMap.unit,
-      cols:  requestedMap.cols,
-      rows:  requestedMap.rows,
-      cells,
-      xAxis: requestedMap.xAxis,
-      yAxis: requestedMap.yAxis
-    };
-
-    return NextResponse.json(parsedMap);
+    return NextResponse.json(parsedMaps);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: msg }, { status: 500 });
