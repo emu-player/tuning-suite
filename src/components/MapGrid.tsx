@@ -1,4 +1,5 @@
 'use client';
+
 import { useState, useRef, useEffect, MouseEvent } from 'react';
 import { useSession } from '@/lib/store';
 
@@ -31,10 +32,20 @@ export default function MapGrid() {
 
   const map = maps.find((m) => m.mapId === activeMapId);
   const dragStart = useRef<{ col: number; row: number } | null>(null);
-
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Forza l'aggiornamento del grafico 3D Canvas se cambia la mappa, la rotazione o i delta pendenti
+  // Esc-key listener per azzerare la selezione corrente
+  useEffect(() => {
+    const handleKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        clearSelection();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [clearSelection]);
+
+  // Aggiornamento del grafico 3D Canvas
   useEffect(() => {
     if (!map || !show3d || !canvasRef.current) return;
     const canvas = canvasRef.current;
@@ -54,7 +65,6 @@ export default function MapGrid() {
     const rows = map.rows;
     const cols = map.cols;
 
-    // Trova min e max per mappare le altezze e i colori termici
     const rawValues: number[] = [];
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
@@ -65,26 +75,23 @@ export default function MapGrid() {
     const maxVal = Math.max(...rawValues);
     const range = maxVal - minVal || 1;
 
-    // Proiezione isometrica con rotazione tridimensionale interattiva
     const drawGrid3D = () => {
       ctx.lineWidth = 1.2;
       const scaleX = (width * 0.45) / cols;
       const scaleY = (height * 0.45) / rows;
-      const scaleZ = 80; // Fattore di amplificazione z-axis
+      const scaleZ = 80;
 
       const cx = width / 2;
       const cy = height / 2 + 30;
 
-      // Generazione e trasformazione dei vertici della mappa
       const vertices: { x: number; y: number; z: number; col: number; row: number; val: number }[][] = [];
       for (let r = 0; r < rows; r++) {
         const rowVertices = [];
         for (let c = 0; c < cols; c++) {
           const val = getVal(c, r);
-          // Coord normalizzate (-1 a 1)
           const nx = (c - cols / 2) / (cols / 2);
           const ny = (r - rows / 2) / (rows / 2);
-          const nz = (val - minVal) / range - 0.5; // normalizzato intorno a zero
+          const nz = (val - minVal) / range - 0.5;
 
           // Rotazione Y (sinistra-destra)
           let x1 = nx * Math.cos(rotY) - nz * Math.sin(rotY);
@@ -94,7 +101,6 @@ export default function MapGrid() {
           let y1 = ny * Math.cos(rotX) - z1 * Math.sin(rotX);
           let z2 = ny * Math.sin(rotX) + z1 * Math.cos(rotX);
 
-          // Moltiplicazione scala
           const px = cx + x1 * scaleX * cols * 0.8;
           const py = cy + y1 * scaleY * rows * 0.8 - (nz + 0.5) * scaleZ;
 
@@ -103,7 +109,6 @@ export default function MapGrid() {
         vertices.push(rowVertices);
       }
 
-      // Rendering delle facce della superficie con sfumature termiche basate sull'altezza reale
       for (let r = 0; r < rows - 1; r++) {
         for (let c = 0; c < cols - 1; c++) {
           const v0 = vertices[r]?.[c];
@@ -113,7 +118,6 @@ export default function MapGrid() {
 
           if (!v0 || !v1 || !v2 || !v3) continue;
 
-          // Calcolo colore della faccia in base alla media dei valori di altezza
           const avgVal = (v0.val + v1.val + v2.val + v3.val) / 4;
           const t = (avgVal - minVal) / range;
           
@@ -132,7 +136,6 @@ export default function MapGrid() {
           ctx.fillStyle = faceColor;
           ctx.fill();
 
-          // Contorno fil di ferro (wireframe)
           ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
           ctx.stroke();
         }
@@ -142,32 +145,39 @@ export default function MapGrid() {
     drawGrid3D();
   }, [map, show3d, rotX, rotY, pendingDeltas]);
 
+  // Schermata di attesa (Stato Idle)
   if (status === 'idle') {
     return (
-      <div style={{
-        flex: 1, display: 'flex', flexDirection: 'column',
-        alignItems: 'center', justifyContent: 'center', gap: 16,
-        background: 'var(--bg-base)'
-      }}>
-        <div style={{ fontSize: 64, color: 'var(--accent)', textShadow: '0 0 15px var(--accent-glow)' }}>⚙</div>
-        <div style={{ color: 'var(--text-secondary)', fontSize: 13, textAlign: 'center', lineHeight: 1.8 }}>
-          Nessun binario caricato in memoria.<br/>
-          <span style={{ color: 'var(--accent)', cursor: 'pointer', fontWeight: 600 }}>Carica un file originale (.bin)</span> per iniziare.
+      <div className="flex-1 flex flex-col items-center justify-center gap-5 p-8 bg-brand-base min-h-[400px] select-none text-center">
+        <div className="w-16 h-16 rounded-2xl bg-brand-surface border border-brand-border flex items-center justify-center shadow-lg animate-bounce duration-1000">
+          <span className="text-3xl text-brand-accent drop-shadow-[0_0_15px_rgba(249,87,22,0.3)]">⚙</span>
+        </div>
+        <div className="space-y-1">
+          <h3 className="text-xs font-bold text-brand-primary tracking-wider uppercase">Nessuna Mappa Caricata</h3>
+          <p className="text-xs text-brand-secondary/70 leading-relaxed max-w-sm">
+            Nessun binario caricato in memoria. <span className="text-brand-accent font-bold hover:underline cursor-pointer">Carica un file originale (.bin)</span> per iniziare.
+          </p>
         </div>
       </div>
     );
   }
 
+  // Schermata di caricamento (Stato Parsing)
   if (status === 'parsing') {
     return (
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 12, background: 'var(--bg-base)' }}>
-        <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--accent)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+      <div className="flex-1 flex flex-col items-center justify-center gap-4 p-8 bg-brand-base select-none">
+        <div className="text-[10px] font-mono font-black text-brand-accent tracking-[0.2em] uppercase animate-pulse">
           Elaborazione file in corso...
         </div>
-        <div style={{ width: 250, height: 2, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
-          <div style={{ height: '100%', background: 'var(--accent)', borderRadius: 2, animation: 'scan 1.2s ease infinite' }} />
+        <div className="w-64 h-1 bg-brand-elevated rounded-full overflow-hidden border border-brand-border/40 relative">
+          <div className="h-full bg-brand-accent rounded-full absolute left-0" style={{ width: '40%', animation: 'scan-infinite 1.4s ease-in-out infinite' }} />
         </div>
-        <style>{`@keyframes scan { 0%{width:0;margin-left:0} 50%{width:70%;margin-left:15%} 100%{width:0;margin-left:100%} }`}</style>
+        <style>{`
+          @keyframes scan-infinite {
+            0% { left: -40%; }
+            100% { left: 100%; }
+          }
+        `}</style>
       </div>
     );
   }
@@ -176,7 +186,6 @@ export default function MapGrid() {
 
   const colCount = map.cols;
   const rowCount = map.rows;
-
   const originalCells = new Map(map.cells.map(c => [`${c.col},${c.row}`, c.physical]));
 
   const getDisplayVal = (c: number, r: number) => {
@@ -192,17 +201,16 @@ export default function MapGrid() {
 
   function heatColor(v: number, min: number, max: number): string {
     const t = (v - min) / (max - min || 1);
-    if (t < 0.25) return `rgba(26, 54, 93, 0.85)`; // Blu freddo
-    if (t < 0.5)  return `rgba(37, 99, 235, 0.75)`; // Azzurro transitorio
-    if (t < 0.7)  return `rgba(180, 110, 10, 0.75)`; // Giallo carico
-    return `rgba(185, 28, 28, 0.85)`; // Rosso picco
+    if (t < 0.25) return `rgba(26, 54, 93, 0.85)`;
+    if (t < 0.5)  return `rgba(37, 99, 235, 0.75)`;
+    if (t < 0.7)  return `rgba(180, 110, 10, 0.75)`;
+    return `rgba(185, 28, 28, 0.85)`;
   }
 
   const values = map.cells.map((c) => c.physical);
   const minVal = Math.min(...values);
   const maxVal = Math.max(...values);
 
-  // Gestione selezioni tabelle
   const onCellDown = (e: MouseEvent<HTMLDivElement>, col: number, row: number) => {
     e.preventDefault();
     dragStart.current = { col, row };
@@ -231,7 +239,6 @@ export default function MapGrid() {
     setMathInput('');
   };
 
-  // Gestione rotazione visualizzatore 3D via mouse dragging
   const handle3DMouseDown = (e: MouseEvent) => {
     isDragging3d.current = true;
     dragStart3d.current = { x: e.clientX, y: e.clientY };
@@ -250,50 +257,73 @@ export default function MapGrid() {
     isDragging3d.current = false;
   };
 
-  // Larghezza di cella fissa e robusta per prevenire allargamenti imprevisti delle colonne
   const cellSize = 56;
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: 'var(--bg-base)' }}>
+    <div className="flex-1 flex flex-col overflow-hidden bg-brand-base">
+      
       {/* Barra Azioni Rapide Chiptuner */}
-      <div className="px-6 py-3 bg-brand-surface border-b border-brand-border flex gap-4 items-center flex-wrap shrink-0">
-        <span className="text-[10px] font-extrabold text-brand-secondary tracking-widest uppercase">TUNING ASSISTANT:</span>
-        <button onClick={applyStage1EGR} className="px-3 py-1.5 bg-brand-accent-glow hover:bg-brand-accent/30 text-brand-accent border border-brand-accent/40 rounded-lg text-xs font-bold cursor-pointer transition-all duration-150">
+      <div className="px-6 py-3 bg-brand-surface border-b border-brand-border flex gap-4 items-center flex-wrap shrink-0 select-none">
+        <span className="text-[10px] font-black text-brand-secondary/60 tracking-wider uppercase">TUNING ASSISTANT:</span>
+        <button 
+          onClick={applyStage1EGR} 
+          className="px-3.5 py-1.5 bg-brand-accent-glow hover:bg-brand-accent/25 text-brand-accent border border-brand-accent/40 rounded-lg text-xs font-bold cursor-pointer transition-all duration-150 active:scale-[0.98]"
+        >
           EGR Close (Software Off)
         </button>
-        <button onClick={applyHardcutLimit} className="px-3 py-1.5 bg-brand-accent-glow hover:bg-brand-accent/30 text-brand-accent border border-brand-accent/40 rounded-lg text-xs font-bold cursor-pointer transition-all duration-150">
+        <button 
+          onClick={applyHardcutLimit} 
+          className="px-3.5 py-1.5 bg-brand-accent-glow hover:bg-brand-accent/25 text-brand-accent border border-brand-accent/40 rounded-lg text-xs font-bold cursor-pointer transition-all duration-150 active:scale-[0.98]"
+        >
           Hardcut Popcorn + Stage 1
         </button>
 
         <div className="w-[1px] h-5 bg-brand-border" />
 
+        {/* Console Matematica di Taratura (Attiva solo se ci sono selezioni) */}
         {selectedKeys.size > 0 && (
-          <div className="flex gap-2 items-center">
-            <span className="text-xs text-brand-secondary font-semibold">Selezionati ({selectedKeys.size}):</span>
+          <div className="flex gap-2.5 items-center bg-brand-elevated/40 px-3 py-1 rounded-lg border border-brand-border/60">
+            <span className="text-xs text-brand-secondary font-bold">Selezionati ({selectedKeys.size}):</span>
             <input
               value={mathInput}
               onChange={(e) => { setMathInput(e.target.value); setMathErr(null); }}
               placeholder="es. *1.08"
-              className="bg-brand-elevated border border-brand-border-bright text-white rounded-lg px-2 py-1 w-20 text-xs outline-none font-mono focus:border-brand-accent"
+              className="bg-brand-elevated border border-brand-border text-white rounded-lg px-2.5 py-1 w-20 text-xs outline-none font-mono focus:border-brand-accent transition-colors"
               onKeyDown={(e) => { if (e.key === 'Enter') executeMath(); }}
             />
-            <button onClick={executeMath} className="px-3 py-1 bg-brand-border-bright hover:bg-brand-hover text-white rounded-md text-xs cursor-pointer">Applica</button>
-            <button onClick={applyInterpolate} className="px-3 py-1 bg-brand-accent hover:bg-brand-accent/90 text-white font-bold rounded-md text-xs cursor-pointer shadow-[0_0_8px_var(--color-brand-accent)]">Interpolazione 2D</button>
-            {mathErr && <span className="text-brand-err text-[10px] font-bold">{mathErr}</span>}
+            <button 
+              onClick={executeMath} 
+              className="px-3 py-1 bg-brand-border-bright hover:bg-brand-border-bright/80 text-white rounded-md text-xs font-semibold cursor-pointer active:scale-95"
+            >
+              Applica
+            </button>
+            <button 
+              onClick={applyInterpolate} 
+              className="px-3 py-1 bg-brand-accent hover:bg-brand-accent/95 text-white font-bold rounded-md text-xs cursor-pointer shadow-[0_2px_8px_rgba(249,87,22,0.3)] active:scale-95"
+            >
+              Interpolazione 2D
+            </button>
+            {mathErr && (
+              <span className="text-brand-err text-[10px] font-bold tracking-wide animate-pulse">{mathErr}</span>
+            )}
           </div>
         )}
 
         <div className="flex-grow" />
 
-        <button onClick={() => setShow3d(!show3d)} className="px-4 py-1.5 bg-brand-elevated border border-brand-border hover:bg-brand-hover text-brand-primary text-xs font-bold rounded-lg cursor-pointer">
+        <button 
+          onClick={() => setShow3d(!show3d)} 
+          className="px-4 py-1.5 bg-brand-elevated border border-brand-border hover:bg-brand-elevated-hover text-brand-primary text-xs font-bold rounded-lg cursor-pointer transition-colors active:scale-95"
+        >
           {show3d ? 'Nascondi Grafico 3D' : 'Mostra Grafico 3D'}
         </button>
       </div>
 
       <div className="flex-1 flex overflow-hidden">
+        
         {/* Griglia Valori Professionale */}
         <div className="flex-1 overflow-auto p-6 relative">
-          <div className="flex justify-between items-center mb-4 shrink-0">
+          <div className="flex justify-between items-start mb-5 shrink-0 select-none">
             <div>
               <h3 className="text-sm font-bold text-white tracking-wide uppercase">{map.label}</h3>
               <p className="text-[10px] text-brand-secondary mt-0.5 font-semibold">
@@ -301,23 +331,28 @@ export default function MapGrid() {
               </p>
             </div>
             {pendingDeltas.size > 0 && (
-              <button onClick={commitPatch} className="px-4 py-2 bg-brand-accent text-white font-extrabold text-xs rounded-lg hover:bg-brand-accent/90 cursor-pointer shadow-[0_0_12px_rgba(249,87,22,0.4)] tracking-wide uppercase">
+              <button 
+                onClick={commitPatch} 
+                className="px-4.5 py-2 bg-brand-accent text-white font-black text-xs rounded-lg hover:bg-brand-accent/90 cursor-pointer shadow-[0_4px_14px_rgba(249,87,22,0.4)] tracking-wide uppercase active:scale-[0.98] transition-all"
+              >
                 Applica Modifiche & Checksum ({pendingDeltas.size})
               </button>
             )}
           </div>
 
-          {/* Griglia di taratura a larghezza fissa per evitare distorsioni */}
+          {/* Tabella di calibrazione a larghezza fissa protetta */}
           <div className="inline-block relative min-w-max pb-8" onMouseUp={() => { dragStart.current = null; }}>
+            
             {/* Header Assi X (RPM o Pressione) */}
-            <div className="flex" style={{ marginLeft: 64 }}>
+            <div className="flex select-none" style={{ marginLeft: 64 }}>
               {Array.from({ length: colCount }, (_, c) => {
                 const headerValue = map.xAxis?.values[c];
                 return (
-                  <div key={c} style={{
-                    width: cellSize, fontSize: 9, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)',
-                    textAlign: 'center', paddingBottom: 6, borderBottom: '1px solid var(--border)', fontWeight: 700
-                  }}>
+                  <div 
+                    key={c} 
+                    style={{ width: cellSize }}
+                    className="text-[9px] font-mono font-bold text-brand-secondary/60 text-center pb-1.5 border-b border-brand-border/60"
+                  >
                     {headerValue !== undefined ? headerValue : c}
                   </div>
                 );
@@ -329,11 +364,12 @@ export default function MapGrid() {
               const yHeader = map.yAxis?.values[r];
               return (
                 <div key={r} className="flex items-center">
+                  
                   {/* Header Asse Y */}
-                  <div style={{
-                    width: 58, paddingRight: 8, textAlign: 'right', fontSize: 9,
-                    fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', fontWeight: 700, flexShrink: 0
-                  }}>
+                  <div 
+                    style={{ width: 58 }}
+                    className="pr-2.5 text-right text-[9px] font-mono font-bold text-brand-secondary/60 shrink-0 select-none"
+                  >
                     {yHeader !== undefined ? yHeader : r}
                   </div>
 
@@ -350,23 +386,27 @@ export default function MapGrid() {
                         onMouseDown={(e) => onCellDown(e, c, r)}
                         onMouseEnter={() => onCellEnter(c, r)}
                         style={{
-                          width: cellSize, height: 26, background: isSelected ? 'var(--accent)' : heatColor(val, minVal, maxVal),
-                          border: isSelected ? '1.5px solid #fff' : '1px solid rgba(0,0,0,0.25)',
-                          display: 'flex', alignItems: 'center', justifyContent: 'center',
-                          cursor: 'crosshair', position: 'relative', transition: 'background 0.05s', flexShrink: 0
+                          width: cellSize, 
+                          height: 26, 
+                          background: isSelected ? 'var(--accent)' : heatColor(val, minVal, maxVal),
+                          border: isSelected ? '1.5px solid #ffffff' : '1px solid rgba(0,0,0,0.18)',
                         }}
+                        className="flex items-center justify-center cursor-crosshair relative transition-all duration-75 shrink-0"
                       >
-                        <span style={{
-                          fontFamily: 'var(--font-mono)', fontSize: 9, fontWeight: isSelected ? 800 : 600,
-                          color: '#ffffff', textShadow: '0 1px 2px rgba(0,0,0,0.85)'
-                        }}>
+                        {/* Valore cella */}
+                        <span 
+                          style={{ textShadow: '0 1px 2px rgba(0,0,0,0.85)' }}
+                          className={`font-mono text-[9px] text-white ${isSelected ? 'font-extrabold' : 'font-semibold'}`}
+                        >
                           {val.toFixed(1)}
                         </span>
+                        
+                        {/* Delta Differenziale (se modificato) */}
                         {delta !== 0 && (
-                          <div style={{
-                            position: 'absolute', bottom: 1, right: 2, fontSize: 7, fontWeight: 800,
-                            color: delta > 0 ? '#4ade80' : '#f87171', textShadow: '0 1px 1px rgba(0,0,0,0.9)'
-                          }}>
+                          <div 
+                            style={{ textShadow: '0 1px 1px rgba(0,0,0,0.9)' }}
+                            className={`absolute bottom-0.5 right-1.5 text-[7px] font-black tracking-wide ${delta > 0 ? 'text-green-400' : 'text-red-400'}`}
+                          >
                             {delta > 0 ? `+${delta.toFixed(0)}` : delta.toFixed(0)}
                           </div>
                         )}
@@ -378,17 +418,21 @@ export default function MapGrid() {
             })}
           </div>
 
-          <div className="mt-4 text-[10px] text-brand-secondary/80 font-semibold font-mono">
+          <div className="mt-4 text-[10px] text-brand-secondary/60 font-semibold font-mono select-none">
             * ESC per annullare la selezione. Clicca e trascina per selezionare intervalli bidimensionali.
           </div>
         </div>
 
         {/* Visualizzazione 3D ed Hex Dump laterali */}
         {show3d && (
-          <div className="w-[380px] shrink-0 border-l border-brand-border bg-brand-surface flex flex-col overflow-hidden">
+          <div className="w-[380px] shrink-0 border-l border-brand-border bg-brand-surface flex flex-col overflow-hidden select-none">
+            
+            {/* Header Sezione 3D */}
             <div className="px-4 py-3 border-b border-brand-border text-xs font-bold text-white uppercase tracking-wider bg-brand-surface/40">
               ANALISI GEO-MAPPA 3D (Trascina per ruotare)
             </div>
+            
+            {/* Render Mesh isometrico Canvas */}
             <div className="flex-1 relative bg-[#030507] flex justify-center items-center overflow-hidden">
               <canvas
                 ref={canvasRef}
@@ -398,16 +442,16 @@ export default function MapGrid() {
                 onMouseMove={handle3DMouseMove}
                 onMouseUp={handle3DMouseUp}
                 onMouseLeave={handle3DMouseUp}
-                style={{ cursor: isDragging3d.current ? 'grabbing' : 'grab' }}
+                className={`transition-transform duration-75 ${isDragging3d.current ? 'cursor-grabbing' : 'cursor-grab'}`}
               />
             </div>
 
             {/* Ispezione Esadecimale in tempo reale */}
             <div className="h-[180px] border-t border-brand-border flex flex-col bg-[#05070a]">
-              <div className="px-4 py-2 border-b border-brand-border text-[9px] font-extrabold text-brand-secondary tracking-widest uppercase">
+              <div className="px-4 py-2 border-b border-brand-border text-[9px] font-black text-brand-secondary/50 tracking-widest uppercase">
                 RAW MEMORY HEX DUMP
               </div>
-              <div className="flex-1 p-4 overflow-y-auto font-mono text-[10px] text-brand-secondary/80 leading-relaxed">
+              <div className="flex-1 p-4 overflow-y-auto font-mono text-[10px] text-brand-secondary/80 leading-relaxed scrollbar-none">
                 {Array.from({ length: Math.min(6, Math.ceil(map.cells.length / 8)) }, (_, rowIdx) => {
                   const chunkCells = map.cells.slice(rowIdx * 8, (rowIdx + 1) * 8);
                   const hexVals = chunkCells.map(c => {
@@ -421,17 +465,19 @@ export default function MapGrid() {
                   }).join('');
 
                   return (
-                    <div key={rowIdx} className="flex justify-between font-mono">
-                      <span className="text-brand-accent">{(rowIdx * 16).toString(16).padStart(6, '0').toUpperCase()}</span>
+                    <div key={rowIdx} className="flex justify-between font-mono font-medium tracking-wide">
+                      <span className="text-brand-accent/80 font-bold">{(rowIdx * 16).toString(16).padStart(6, '0').toUpperCase()}</span>
                       <span className="text-[#e2e8f0]">{hexVals}</span>
-                      <span className="text-brand-muted">| {asciiVals} |</span>
+                      <span className="text-brand-muted opacity-60">| {asciiVals} |</span>
                     </div>
                   );
                 })}
               </div>
             </div>
+
           </div>
         )}
+
       </div>
     </div>
   );
