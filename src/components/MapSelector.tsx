@@ -12,7 +12,6 @@ export default function MapSelector() {
       aria-label="Selettore mappe integrato"
       className="relative w-full border-b border-brand-border bg-brand-surface/40 backdrop-blur-md select-none"
     >
-      {/* Indicatori sfumati premium per lo scorrimento orizzontale su schermi ridotti */}
       <div className="absolute left-0 top-0 bottom-0 w-6 bg-gradient-to-r from-brand-surface/60 to-transparent pointer-events-none z-10" />
       <div className="absolute right-0 top-0 bottom-0 w-6 bg-gradient-to-l from-brand-surface/60 to-transparent pointer-events-none z-10" />
 
@@ -20,7 +19,6 @@ export default function MapSelector() {
         role="tablist"
         className="flex items-center gap-2.5 px-6 py-3.5 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden scroll-smooth snap-x"
       >
-        {/* Etichetta di Sezione con Icona Identificativa */}
         <div className="flex items-center gap-2 mr-3 shrink-0">
           <svg 
             className="w-3.5 h-3.5 text-brand-secondary/40" 
@@ -37,20 +35,9 @@ export default function MapSelector() {
           </span>
         </div>
 
-        {/* Lista dinamica delle Mappe */}
         {maps.map((m) => {
           const isActive = activeMapId === m.mapId;
-          
-          // Verifica sicura delle modifiche pendenti (array-based o key-value map)
-          const hasPending = !!(
-            pendingDeltas && (
-              Array.isArray(pendingDeltas) 
-                ? pendingDeltas.some((d: any) => d?.mapId === m.mapId || d?.map === m.mapId) 
-                : typeof pendingDeltas === 'object' 
-                  ? (pendingDeltas[m.mapId] || Object.keys(pendingDeltas).includes(m.mapId))
-                  : false
-            )
-          );
+          const hasPending = isActive && pendingDeltas && pendingDeltas.size > 0;
 
           return (
             <button
@@ -70,7 +57,6 @@ export default function MapSelector() {
                 }
               `}
             >
-              {/* Indicatore visivo per le modifiche pendenti (es. celle modificate non salvate) */}
               {hasPending && (
                 <span className="relative flex h-2 w-2 shrink-0" title="Modifiche pendenti">
                   <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${isActive ? 'bg-white' : 'bg-brand-accent'}`}></span>
@@ -78,12 +64,10 @@ export default function MapSelector() {
                 </span>
               )}
 
-              {/* Label della mappa con troncamento intelligente per schermi piccoli */}
               <span className="truncate max-w-[130px] sm:max-w-[200px] md:max-w-none">
                 {m.label}
               </span>
 
-              {/* Badge dell'unità di misura (es. hPa, Nm, km/h) */}
               <span 
                 className={`
                   font-mono text-[9px] px-1.5 py-0.5 rounded leading-none font-bold tracking-wider shrink-0 transition-colors duration-200

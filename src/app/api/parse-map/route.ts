@@ -2,21 +2,19 @@ import { NextRequest, NextResponse } from 'next/server';
 import { BinaryParser } from '@/lib/server/BinaryParser';
 import { XdfParser } from '@/lib/server/XdfParser';
 import { A2lParser } from '@/lib/server/A2lParser';
-import { MAP_DEFINITIONS, mapIdRegistry } from '@/lib/definitions';
+import { MAP_DEFINITIONS } from '@/lib/definitions';
+import { FileCache } from '@/lib/server/Cache';
 import type { MapDefinition, ParsedMap } from '@/types/calibration';
 import { createHash, randomBytes } from 'node:crypto';
 
 export const runtime = 'nodejs';
 export const maxDuration = 30;
 
-export const binaryCache = new Map<string, ArrayBuffer>();
-export const activeDefinitionsCache = new Map<string, MapDefinition>();
-
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
     const file = formData.get('file');
-    const driver = formData.get('driver'); // File di driver .xdf o .a2l opzionale
+    const driver = formData.get('driver');
     const mapId = formData.get('mapId');
 
     if (!(file instanceof File)) {
@@ -26,15 +24,14 @@ export async function POST(req: NextRequest) {
     const arrayBuffer = await file.arrayBuffer();
     const buffer = arrayBuffer.slice(0);
 
-    // Selezione o elaborazione dinamica della definizione
     let targetDefinitions = MAP_DEFINITIONS;
 
     if (driver instanceof File) {
       const driverContent = await driver.text();
-      if (driver.name.endsWith('.xdf')) {
+      if (driver.name.toLowerCase().endsWith('.xdf')) {
         targetDefinitions = XdfParser.parse(driverContent, buffer.byteLength);
-      } else if (driver.name.endsWith('.a2l')) {
-        targetDefinitions = await A2lParser.parse(driverContent, buffer.byteLength);
+      } else if (driver.name.toLowerCase().endsWith('.a2l')) {
+        targetDefinitions = await A2lParser.parse(driverContent, buffer);
       }
     }
 
@@ -50,28 +47,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Mappa richiesta non trovata.' }, { status: 404 });
     }
 
-    const stride = requestedMap.dataType === 'float32' || requestedMap.dataType === 'uint32' || requestedMap.dataType === 'int32' ? 4
-      : requestedMap.dataType === 'uint16' || requestedMap.dataType === 'int16' ? 2 : 1;
-    const requiredBytes = requestedMap.offset + requestedMap.rows * requestedMap.cols * stride;
-
-    let workingBuffer = buffer;
-    if (buffer.byteLength < requiredBytes) {
-      workingBuffer = new ArrayBuffer(requiredBytes + 1024);
-      new Uint8Array(workingBuffer).set(new Uint8Array(buffer), 0);
-    }
-
-    const parser = new BinaryParser(workingBuffer);
+    const parser = new BinaryParser(buffer);
     const cells = parser.parseMap(requestedMap);
 
+    // Generazione ID Sessione Criptografico O(1)
     const nonce = randomBytes(16).toString('hex');
-    const opaqueId = createHash('sha256')
-      .update(`${requestedMap.id}:${nonce}`)
-      .digest('hex')
-      .slice(0, 32);
+    const opaqueId = createHash('sha256').update(`${requestedMap.id}:${nonce}`).digest('hex').slice(0, 32);
 
-    mapIdRegistry.set(opaqueId, requestedMap.id);
-    binaryCache.set(opaqueId, workingBuffer);
-    activeDefinitionsCache.set(requestedMap.id, requestedMap);
+    // Persistenza Stateless su Disco Locale
+    await FileCache.saveSession(opaqueId, buffer, requestedMap);
 
     const parsedMap: ParsedMap = {
       mapId: opaqueId,

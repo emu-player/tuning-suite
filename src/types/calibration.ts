@@ -7,7 +7,7 @@ export type EcuFamily = 'EDC15' | 'EDC16' | 'EDC17' | 'MD1' | 'SID807' | 'GENERI
 export type SessionStatus = 'idle' | 'parsing' | 'ready' | 'writing' | 'error';
 
 export type RawDataType =
-  | 'float32' | 'uint8' | 'int8'
+  | 'float32' | 'float64' | 'uint8' | 'int8'
   | 'uint16'  | 'int16' | 'uint32' | 'int32';
 
 export interface AxisDefinition {
@@ -36,6 +36,8 @@ export interface MapDefinition {
   swappedAxes?: boolean;
   formulaForward?: string;
   formulaReverse?: string;
+  physMin?: number;
+  physMax?: number;
 }
 
 export interface ChecksumBlockDefinition {
@@ -46,7 +48,6 @@ export interface ChecksumBlockDefinition {
   storeOffset: number;
   storeDataType: 'uint16' | 'uint32';
   storeEndianness: Endianness;
-  // Parametri per checksum a matrice CRC e calcoli multilivello
   polynomial?: number;
   initXor?: number;
   finalXor?: number;
