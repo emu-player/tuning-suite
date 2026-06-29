@@ -1,6 +1,13 @@
 import type { ChecksumBlockDefinition } from '@/types/calibration';
 import { Endianness } from '@/types/calibration';
 
+export interface TprotSignature {
+  ecuFamily: string;
+  targetPattern: number[];
+  patchPattern: number[];
+  description: string;
+}
+
 /**
  * Tabella statica pre-calcolata per la riflessione rapida a 8-bit.
  */
@@ -99,25 +106,46 @@ export function calculateCustomCrc32(
  */
 export class ChecksumEngine {
   private readonly blocks: Map<string, ChecksumBlockDefinition>;
+  private readonly tprotDatabase: TprotSignature[];
 
-  constructor(defs: ChecksumBlockDefinition[]) {
+  /**
+   * Database di pattern noti di firme TPROT per le centraline più diffuse.
+   */
+  private static readonly DEFAULT_TPROT_DATABASE: TprotSignature[] = [
+    {
+      ecuFamily: 'Bosch_Tricore_MED17_EDC17_Gen1',
+      targetPattern: [0x3C, 0xD4, 0x07, 0x00, 0x1F, 0x80, 0x00, 0x10],
+      patchPattern:  [0x3C, 0xD4, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00],
+      description: 'Bosch MED17/EDC17 early TPROT bypass'
+    },
+    {
+      ecuFamily: 'Bosch_Tricore_MED17_EDC17_Gen2',
+      targetPattern: [0x3C, 0xD4, 0x08, 0x00, 0x1F, 0x80, 0x00, 0x10],
+      patchPattern:  [0x3C, 0xD4, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00],
+      description: 'Bosch MED17/EDC17 mid TPROT bypass'
+    },
+    {
+      ecuFamily: 'Siemens_PCR2_1',
+      targetPattern: [0x8B, 0x45, 0x0C, 0x3B, 0x45, 0x08, 0x75, 0x0C],
+      patchPattern:  [0x8B, 0x45, 0x0C, 0x3B, 0x45, 0x08, 0x90, 0x90],
+      description: 'Siemens Continental PCR2.1 signature bypass'
+    }
+  ];
+
+  constructor(defs: ChecksumBlockDefinition[], customTprotSignatures?: TprotSignature[]) {
     this.blocks = new Map(defs.map(d => [d.id, d]));
+    this.tprotDatabase = customTprotSignatures
+      ? [...ChecksumEngine.DEFAULT_TPROT_DATABASE, ...customTprotSignatures]
+      : ChecksumEngine.DEFAULT_TPROT_DATABASE;
   }
 
   /**
-   * Scansione ottimizzata tramite algoritmo Boyer-Moore-Horspool e patching del sistema TPROT.
+   * Implementazione astratta e ottimizzata dell'algoritmo Boyer-Moore-Horspool.
    */
-  public applyTprotBypass(buffer: ArrayBuffer): { patched: boolean; offset: number } {
-    const u8 = new Uint8Array(buffer);
-    
-    const targetPattern = [0x3C, 0xD4, 0x07, 0x00, 0x1F, 0x80, 0x00, 0x10];
-    const patchPattern  = [0x3C, 0xD4, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00];
-
+  private searchAndPatch(u8: Uint8Array, target: number[], patch: number[]): number {
     const len = u8.length;
-    const patLen = targetPattern.length;
-    if (len < patLen) {
-      return { patched: false, offset: -1 };
-    }
+    const patLen = target.length;
+    if (len < patLen) return -1;
 
     // Inizializzazione della tabella degli spostamenti BMH (Bad Character Shift)
     const shiftTable = new Int32Array(256);
@@ -125,34 +153,50 @@ export class ChecksumEngine {
       shiftTable[i] = patLen;
     }
     for (let i = 0; i < patLen - 1; i++) {
-      shiftTable[targetPattern[i]!] = patLen - 1 - i;
+      shiftTable[target[i]!] = patLen - 1 - i;
     }
 
-    let foundOffset = -1;
     let skip = 0;
 
-    // Ricerca rapida con salti multipli nel buffer binario [1]
+    // Ricerca rapida con salti multipli nel buffer binario
     while (len - skip >= patLen) {
       let match = true;
       for (let i = patLen - 1; i >= 0; i--) {
-        if (u8[skip + i] !== targetPattern[i]) {
+        if (u8[skip + i] !== target[i]) {
           match = false;
           break;
         }
       }
       if (match) {
-        foundOffset = skip;
-        break;
+        u8.set(patch, skip);
+        return skip;
       }
       skip += shiftTable[u8[skip + patLen - 1]!]!;
     }
 
-    if (foundOffset !== -1) {
-      u8.set(patchPattern, foundOffset);
-      return { patched: true, offset: foundOffset };
+    return -1;
+  }
+
+  /**
+   * Scansione ottimizzata multi-pattern e patching dinamico del sistema TPROT.
+   * Esegue la ricerca automatica su tutte le firme registrate nel database, oppure limita
+   * la ricerca ad una specifica famiglia di centraline se viene passato il parametro opzionale targetFamily.
+   */
+  public applyTprotBypass(buffer: ArrayBuffer, targetFamily?: string): { patched: boolean; offset: number; ecuFamily: string } {
+    const u8 = new Uint8Array(buffer);
+    
+    const targets = targetFamily
+      ? this.tprotDatabase.filter(sig => sig.ecuFamily.toLowerCase() === targetFamily.toLowerCase())
+      : this.tprotDatabase;
+
+    for (const sig of targets) {
+      const offset = this.searchAndPatch(u8, sig.targetPattern, sig.patchPattern);
+      if (offset !== -1) {
+        return { patched: true, offset, ecuFamily: sig.ecuFamily };
+      }
     }
 
-    return { patched: false, offset: -1 };
+    return { patched: false, offset: -1, ecuFamily: 'UNKNOWN' };
   }
 
   /**

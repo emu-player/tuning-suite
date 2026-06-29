@@ -1,9 +1,236 @@
 import type { MapDefinition, RawDataType } from '@/types/calibration';
 import { Endianness } from '@/types/calibration';
 
+type RpnTokenType = 'NUM' | 'VAR' | 'OP' | 'UNARY_MINUS';
+
+interface RpnToken {
+  type: RpnTokenType;
+  value?: number;
+  op?: '+' | '-' | '*' | '/';
+}
+
+interface InfixToken {
+  type: 'NUM' | 'VAR' | 'OP' | 'LPAREN' | 'RPAREN' | 'UNARY_MINUS';
+  value?: string;
+}
+
+/**
+ * Tokenizzatore robusto a livello di carattere che supporta numeri decimali,
+ * notazione scientifica, variabili e distinzione degli operatori unari.
+ */
+function tokenizeExpression(expr: string): InfixToken[] {
+  const res: InfixToken[] = [];
+  let i = 0;
+  const len = expr.length;
+  let expectUnary = true;
+
+  while (i < len) {
+    const char = expr[i]!;
+
+    if (char <= ' ') {
+      i++;
+      continue;
+    }
+
+    if (char === '(') {
+      res.push({ type: 'LPAREN' });
+      expectUnary = true;
+      i++;
+      continue;
+    }
+
+    if (char === ')') {
+      res.push({ type: 'RPAREN' });
+      expectUnary = false;
+      i++;
+      continue;
+    }
+
+    if (char === '+' || char === '*' || char === '/') {
+      res.push({ type: 'OP', value: char });
+      expectUnary = true;
+      i++;
+      continue;
+    }
+
+    if (char === '-') {
+      if (expectUnary) {
+        res.push({ type: 'UNARY_MINUS' });
+      } else {
+        res.push({ type: 'OP', value: '-' });
+      }
+      expectUnary = true;
+      i++;
+      continue;
+    }
+
+    if (char === 'x' || char === 'X') {
+      res.push({ type: 'VAR' });
+      expectUnary = false;
+      i++;
+      continue;
+    }
+
+    // Estrazione dei costrutti numerici (incluso supporto a formati del tipo 1e-5 o 2.3e+3)
+    if ((char >= '0' && char <= '9') || char === '.') {
+      const start = i;
+      while (i < len) {
+        const c = expr[i]!;
+        if ((c >= '0' && c <= '9') || c === '.') {
+          i++;
+        } else if (c === 'e' || c === 'E') {
+          i++;
+          if (i < len && (expr[i] === '+' || expr[i] === '-')) {
+            i++;
+          }
+        } else {
+          break;
+        }
+      }
+      const numStr = expr.substring(start, i);
+      res.push({ type: 'NUM', value: numStr });
+      expectUnary = false;
+      continue;
+    }
+
+    i++; // Salta caratteri non supportati in modo sicuro
+  }
+  return res;
+}
+
+/**
+ * Converte i token infissi in notazione postfissa (RPN) tramite l'algoritmo Shunting-Yard.
+ */
+function compileToRpn(expression: string): RpnToken[] {
+  const tokens = tokenizeExpression(expression);
+  const outputQueue: RpnToken[] = [];
+  const operatorStack: InfixToken[] = [];
+
+  const precedence: Record<string, number> = {
+    '+': 1,
+    '-': 1,
+    '*': 2,
+    '/': 2,
+    'UNARY_MINUS': 3
+  };
+
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!;
+
+    if (token.type === 'NUM') {
+      outputQueue.push({ type: 'NUM', value: parseFloat(token.value!) });
+    } else if (token.type === 'VAR') {
+      outputQueue.push({ type: 'VAR' });
+    } else if (token.type === 'UNARY_MINUS') {
+      operatorStack.push(token);
+    } else if (token.type === 'OP') {
+      const op = token.value!;
+      while (
+        operatorStack.length > 0 &&
+        operatorStack[operatorStack.length - 1]!.type !== 'LPAREN'
+      ) {
+        const top = operatorStack[operatorStack.length - 1]!;
+        const topKey = top.type === 'UNARY_MINUS' ? 'UNARY_MINUS' : (top.value ?? '');
+        if ((precedence[topKey] ?? 0) >= precedence[op]!) {
+          operatorStack.pop();
+          if (top.type === 'UNARY_MINUS') {
+            outputQueue.push({ type: 'UNARY_MINUS' });
+          } else {
+            outputQueue.push({ type: 'OP', op: top.value as any });
+          }
+        } else {
+          break;
+        }
+      }
+      operatorStack.push(token);
+    } else if (token.type === 'LPAREN') {
+      operatorStack.push(token);
+    } else if (token.type === 'RPAREN') {
+      while (
+        operatorStack.length > 0 &&
+        operatorStack[operatorStack.length - 1]!.type !== 'LPAREN'
+      ) {
+        const top = operatorStack.pop()!;
+        if (top.type === 'UNARY_MINUS') {
+          outputQueue.push({ type: 'UNARY_MINUS' });
+        } else {
+          outputQueue.push({ type: 'OP', op: top.value as any });
+        }
+      }
+      operatorStack.pop(); // Rimuove '('
+    }
+  }
+
+  while (operatorStack.length > 0) {
+    const top = operatorStack.pop()!;
+    if (top.type !== 'LPAREN') {
+      if (top.type === 'UNARY_MINUS') {
+        outputQueue.push({ type: 'UNARY_MINUS' });
+      } else {
+        outputQueue.push({ type: 'OP', op: top.value as any });
+      }
+    }
+  }
+
+  return outputQueue;
+}
+
+/**
+ * Valutatore ultra-rapido basato su stack del bytecode RPN.
+ */
+function evaluateRpn(rpn: RpnToken[], variableValue: number): number {
+  const stack: number[] = [];
+
+  for (let i = 0; i < rpn.length; i++) {
+    const t = rpn[i]!;
+    if (t.type === 'NUM') {
+      stack.push(t.value!);
+    } else if (t.type === 'VAR') {
+      stack.push(variableValue);
+    } else if (t.type === 'UNARY_MINUS') {
+      const val = stack.pop() ?? 0;
+      stack.push(-val);
+    } else if (t.type === 'OP') {
+      const b = stack.pop() ?? 0;
+      const a = stack.pop() ?? 0;
+      switch (t.op) {
+        case '+': stack.push(a + b); break;
+        case '-': stack.push(a - b); break;
+        case '*': stack.push(a * b); break;
+        case '/': stack.push(b === 0 ? 0 : a / b); break;
+      }
+    }
+  }
+  return stack[0] ?? 0;
+}
+
+// Cache globale pre-compilata per le formule matematiche XDF
+const rpnCache = new Map<string, RpnToken[]>();
+
+function getOrCompileRpn(expression: string): RpnToken[] {
+  let compiled = rpnCache.get(expression);
+  if (!compiled) {
+    compiled = compileToRpn(expression);
+    rpnCache.set(expression, compiled);
+  }
+  return compiled;
+}
+
+/**
+ * Valuta in sicurezza un'espressione matematica compilando ed eseguendo l'RPN.
+ */
+function evaluateExpression(expression: string, variableValue: number): number {
+  try {
+    const rpn = getOrCompileRpn(expression);
+    return evaluateRpn(rpn, variableValue);
+  } catch {
+    return variableValue;
+  }
+}
+
 /**
  * Estrae in modo case-insensitive e veloce il valore interno di un tag XML.
- * Esente da vulnerabilità di tipo ReDoS (Regular Expression Denial of Service) [1].
+ * Esente da vulnerabilità di tipo ReDoS (Regular Expression Denial of Service).
  */
 function extractTagValueCI(xml: string, tag: string): string {
   const lowerXml = xml.toLowerCase();
@@ -24,80 +251,26 @@ function extractTagValueCI(xml: string, tag: string): string {
 
 /**
  * Estrae il valore di un attributo specifico all'interno di un tag XML.
+ * Gestisce in modo sicuro variazioni di spaziature intorno al simbolo '=' e supporta apici doppi, singoli o valori non quotati.
  */
 function extractAttribute(xml: string, attr: string): string {
-  const lowerXml = xml.toLowerCase();
-  const lowerAttr = attr.toLowerCase() + '=';
-  const attrIdx = lowerXml.indexOf(lowerAttr);
-  if (attrIdx === -1) return '';
-
-  const valStart = attrIdx + lowerAttr.length;
-  let quoteChar = xml[valStart];
-  let startOffset = 1;
-  if (quoteChar !== '"' && quoteChar !== "'") {
-    quoteChar = ' ';
-    startOffset = 0;
-  }
-
-  const quoteIdx = xml.indexOf(quoteChar, valStart + startOffset);
-  if (quoteIdx === -1) return '';
-
-  return xml.substring(valStart + startOffset, quoteIdx).trim();
+  const escapedAttr = attr.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+  const regex = new RegExp(`${escapedAttr}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^>\\s]+))`, 'i');
+  const match = regex.exec(xml);
+  if (!match) return '';
+  return (match[1] || match[2] || match[3] || '').trim();
 }
 
 /**
- * Risolve linearmente un'espressione matematica di base adatta alla generazione dinamica degli assi.
+ * Risolve un'espressione matematica complessa adatta alla generazione dinamica degli assi tramite motore RPN.
  */
 function evaluateLinearExpression(eq: string, xVal: number): number {
-  const clean = eq.replace(/\s+/g, '').toLowerCase();
-  if (clean === 'x') return xVal;
-
-  try {
-    let factor = 1.0;
-    let offset = 0.0;
-
-    if (clean.includes('*')) {
-      const parts = clean.split('*');
-      if (parts[0] === 'x') {
-        const secondPart = parts[1] ?? '1';
-        if (secondPart.includes('+')) {
-          const subParts = secondPart.split('+');
-          factor = parseFloat(subParts[0]!) || 1.0;
-          offset = parseFloat(subParts[1]!) || 0.0;
-        } else if (secondPart.includes('-')) {
-          const subParts = secondPart.split('-');
-          factor = parseFloat(subParts[0]!) || 1.0;
-          offset = -(parseFloat(subParts[1]!) || 0.0);
-        } else {
-          factor = parseFloat(secondPart) || 1.0;
-        }
-      }
-    } else if (clean.includes('+')) {
-      const parts = clean.split('+');
-      if (parts[0] === 'x') {
-        offset = parseFloat(parts[1]!) || 0.0;
-      }
-    } else if (clean.includes('-')) {
-      const parts = clean.split('-');
-      if (parts[0] === 'x') {
-        offset = -(parseFloat(parts[1]!) || 0.0);
-      }
-    } else if (clean.includes('/')) {
-      const parts = clean.split('/');
-      if (parts[0] === 'x') {
-        factor = 1.0 / (parseFloat(parts[1]!) || 1.0);
-      }
-    }
-
-    return xVal * factor + offset;
-  } catch {
-    return xVal * 10;
-  }
+  return evaluateExpression(eq, xVal);
 }
 
 /**
  * Parser per i file XML XDF di TunerPro.
- * Ottimizzato tramite scansione manuale per massimizzare le performance e la robustezza computazionale [1].
+ * Ottimizzato tramite scansione manuale per massimizzare le performance e la robustezza computazionale.
  */
 export class XdfParser {
   public static parse(xmlContent: string, binarySize: number): MapDefinition[] {
@@ -105,7 +278,7 @@ export class XdfParser {
     let startPos = 0;
     const len = xmlContent.length;
 
-    // Scansione sequenziale tramite indice per individuare tutti i blocchi <XDFTABLE> [1]
+    // Scansione sequenziale tramite indice per individuare tutti i blocchi <XDFTABLE>
     while (startPos < len) {
       const idx = xmlContent.indexOf('<XDFTABLE', startPos);
       if (idx === -1) break;
@@ -295,7 +468,7 @@ export class XdfParser {
       }
     }
 
-    // Generazione dei valori fisici reali dell'asse basati sulla conversione
+    // Generazione dei valori fisici reali dell'asse basati sulla conversione tramite valutatore RPN
     const values: number[] = new Array(size);
     for (let i = 0; i < size; i++) {
       values[i] = evaluateLinearExpression(equation, i);

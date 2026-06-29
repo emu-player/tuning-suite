@@ -186,7 +186,7 @@ export class A2lParser {
       token = tokenizer.nextToken();
     }
 
-    // Fase 2: Estrazione e indicizzazione dei metadati globali
+    // Fase 2: Estrazione e indicizzazione dei metadati globali (Risoluzione ricorsiva dell'AST)
     const compuMethods = new Map<string, CompuMethodMeta>();
     const recordLayouts = new Map<string, RecordLayoutMeta>();
     const axisPtsMap = new Map<string, AxisPtsMeta>();
@@ -225,15 +225,13 @@ function constCharacteristics(
 }
 
 /**
- * Indicizza i metodi di computazione globali per la conversione da valori ECU a valori fisici.
+ * Indicizza in modo ricorsivo (DFS) i metodi di computazione globali per la conversione da valori ECU a valori fisici.
  */
-function indexCompuMethods(root: A2lBlock, map: Map<string, CompuMethodMeta>): void {
-  for (const sub of root.subBlocks) {
-    if (sub.type === 'COMPU_METHOD') {
-      const name = sub.name;
-      const args = sub.args;
-      if (!name) continue;
-
+function indexCompuMethods(block: A2lBlock, map: Map<string, CompuMethodMeta>): void {
+  if (block.type === 'COMPU_METHOD') {
+    const name = block.name;
+    const args = block.args;
+    if (name) {
       let shift = 0;
       if (args[0] && args[0].startsWith('"')) {
         shift = 1; // Salta l'argomento "LongIdentifier" opzionale se presente come stringa quotata
@@ -246,7 +244,7 @@ function indexCompuMethods(root: A2lBlock, map: Map<string, CompuMethodMeta>): v
       let offset = 0.0;
 
       // Ricerca dei coefficienti nei sottomoduli (specifici standard ASAM)
-      for (const nested of sub.subBlocks) {
+      for (const nested of block.subBlocks) {
         if (nested.type === 'COEFFS_LINEAR' || nested.name === 'COEFFS_LINEAR') {
           const a = parseFloat(nested.args[0] ?? '1.0');
           const b = parseFloat(nested.args[1] ?? '0.0');
@@ -293,20 +291,23 @@ function indexCompuMethods(root: A2lBlock, map: Map<string, CompuMethodMeta>): v
       map.set(name, { name, type: convType, unit, factor, offset });
     }
   }
+
+  // Esegue la scansione ricorsiva dei sottomoduli
+  for (const sub of block.subBlocks) {
+    indexCompuMethods(sub, map);
+  }
 }
 
 /**
- * Indicizza i record layout della memoria per determinare con precisione la formattazione dei dati.
+ * Indicizza in modo ricorsivo (DFS) i record layout della memoria per determinare con precisione la formattazione dei dati.
  */
-function indexRecordLayouts(root: A2lBlock, map: Map<string, RecordLayoutMeta>): void {
-  for (const sub of root.subBlocks) {
-    if (sub.type === 'RECORD_LAYOUT') {
-      const name = sub.name;
-      if (!name) continue;
-
+function indexRecordLayouts(block: A2lBlock, map: Map<string, RecordLayoutMeta>): void {
+  if (block.type === 'RECORD_LAYOUT') {
+    const name = block.name;
+    if (name) {
       let dataType: RawDataType = 'uint16';
 
-      for (const nested of sub.subBlocks) {
+      for (const nested of block.subBlocks) {
         if (nested.type === 'FNC_VALUES') {
           const typeStr = nested.args[1];
           if (typeStr) {
@@ -315,26 +316,29 @@ function indexRecordLayouts(root: A2lBlock, map: Map<string, RecordLayoutMeta>):
         }
       }
 
-      const fncIdx = sub.args.findIndex((arg) => arg === 'FNC_VALUES');
-      if (fncIdx !== -1 && sub.args[fncIdx + 2]) {
-        dataType = mapA2lDataType(sub.args[fncIdx + 2]);
+      const fncIdx = block.args.findIndex((arg) => arg === 'FNC_VALUES');
+      if (fncIdx !== -1 && block.args[fncIdx + 2]) {
+        dataType = mapA2lDataType(block.args[fncIdx + 2]);
       }
 
       map.set(name, { name, dataType });
     }
   }
+
+  // Esegue la scansione ricorsiva dei sottomoduli
+  for (const sub of block.subBlocks) {
+    indexRecordLayouts(sub, map);
+  }
 }
 
 /**
- * Indicizza i punti asse condivisi (AXIS_PTS) per estrarre la dimensione reale e la mappatura.
+ * Indicizza in modo ricorsivo (DFS) i punti asse condivisi (AXIS_PTS) per estrarre la dimensione reale e la mappatura.
  */
-function indexAxisPts(root: A2lBlock, map: Map<string, AxisPtsMeta>): void {
-  for (const sub of root.subBlocks) {
-    if (sub.type === 'AXIS_PTS') {
-      const name = sub.name;
-      const args = sub.args;
-      if (!name) continue;
-
+function indexAxisPts(block: A2lBlock, map: Map<string, AxisPtsMeta>): void {
+  if (block.type === 'AXIS_PTS') {
+    const name = block.name;
+    const args = block.args;
+    if (name) {
       let shift = 0;
       if (args[0] && args[0].startsWith('"')) {
         shift = 1;
@@ -358,6 +362,11 @@ function indexAxisPts(root: A2lBlock, map: Map<string, AxisPtsMeta>): void {
         size
       });
     }
+  }
+
+  // Esegue la scansione ricorsiva dei sottomoduli
+  for (const sub of block.subBlocks) {
+    indexAxisPts(sub, map);
   }
 }
 
