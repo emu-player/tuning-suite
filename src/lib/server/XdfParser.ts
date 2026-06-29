@@ -1,69 +1,97 @@
-import type { MapDefinition, RawDataType } from '@/types/calibration';
+import type { MapDefinition, RawDataType, AxisDefinition } from '@/types/calibration';
 import { Endianness } from '@/types/calibration';
 
-function extractTagValueCI(xml: string, tag: string): string {
-  const lowerXml = xml.toLowerCase();
-  const lowerTag = tag.toLowerCase();
-  const startTag = `<${lowerTag}`;
-  const startIdx = lowerXml.indexOf(startTag);
-  if (startIdx === -1) return '';
-  const closeBracket = lowerXml.indexOf('>', startIdx);
-  if (closeBracket === -1) return '';
-  const endTag = `</${lowerTag}>`;
-  const endIdx = lowerXml.indexOf(endTag, closeBracket);
-  if (endIdx === -1) return '';
-  return xml.substring(closeBracket + 1, endIdx).trim();
-}
-
-function extractAttribute(xml: string, attr: string): string {
-  const escapedAttr = attr.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-  const regex = new RegExp(`${escapedAttr}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^>\\s]+))`, 'i');
-  const match = regex.exec(xml);
-  if (!match) return '';
-  return (match[1] || match[2] || match[3] || '').trim();
-}
-
 export class XdfParser {
+  // Pattern primario per la scansione rapida delle tabelle XDF. 
+  // Usa [\s\S] per matchare in sicurezza i newline multipli senza dipendere dalla flag 's' (ES2018+).
+  private static readonly RE_TABLE = /<XDFTABLE[^>]*>([\s\S]*?)<\/XDFTABLE>/gi;
+  
+  // Cache statica per le espressioni regolari dinamiche per abbattere a ZERO il costo di compilazione JIT nei loop
+  private static readonly rxCache = new Map<string, RegExp>();
+
+  /**
+   * Restituisce una RegExp pre-compilata dalla cache per la massima efficienza in V8.
+   */
+  private static getRegex(pattern: string, flags: string = 'i'): RegExp {
+    const key = `${pattern}|${flags}`;
+    let rx = this.rxCache.get(key);
+    if (!rx) {
+      rx = new RegExp(pattern, flags);
+      this.rxCache.set(key, rx);
+    }
+    // Nessuna reset lastIndex necessaria se la flag 'g' non è presente
+    return rx;
+  }
+
+  /**
+   * Estrae un attributo XML catturando sintassi con doppi apici, singoli apici o non quotate.
+   */
+  private static getAttr(block: string, attrName: string): string {
+    const rx = this.getRegex(`\\b${attrName}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^>\\s]+))`, 'i');
+    const match = rx.exec(block);
+    return match ? (match[1] || match[2] || match[3] || '') : '';
+  }
+
+  /**
+   * Estrae il contenuto testuale compreso tra tag XML.
+   */
+  private static getTagValue(block: string, tagName: string): string {
+    const rx = this.getRegex(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'i');
+    const match = rx.exec(block);
+    return match ? match[1]!.trim() : '';
+  }
+
+  /**
+   * Estrae ricorsivamente l'intero blocco interno di un asse specifico.
+   */
+  private static extractAxis(xml: string, axisId: string): string | null {
+    const rx = this.getRegex(`<xdfaxis[^>]*id=["']${axisId}["'][^>]*>([\\s\\S]*?)<\\/xdfaxis>`, 'i');
+    const match = rx.exec(xml);
+    return match ? match[0] : null;
+  }
+
+  /**
+   * Converte stringhe Hex o Dec in un numero intero sicuro.
+   */
+  private static parseNumeric(val: string): number {
+    const s = val.trim().toLowerCase();
+    if (s.startsWith('0x')) return parseInt(s.substring(2), 16);
+    return parseInt(s, 10);
+  }
+
   public static parse(xmlContent: string, binarySize: number): MapDefinition[] {
     const mapDefinitions: MapDefinition[] = [];
-    let startPos = 0;
-    const len = xmlContent.length;
+    let tableMatch: RegExpExecArray | null;
 
-    while (startPos < len) {
-      const idx = xmlContent.indexOf('<XDFTABLE', startPos);
-      if (idx === -1) break;
-      const endIdx = xmlContent.indexOf('</XDFTABLE>', idx);
-      if (endIdx === -1) break;
+    // Reset rigoroso dello stato globale della RegExp in caso di riutilizzo
+    this.RE_TABLE.lastIndex = 0;
 
-      const tableBlock = xmlContent.substring(idx, endIdx + 11);
-      startPos = endIdx + 11;
+    // Parsing O(N) tramite cursore nativo di V8, nessuna substringa manuale spazzatura
+    while ((tableMatch = this.RE_TABLE.exec(xmlContent)) !== null) {
+      const tableTagBlock = tableMatch[0].substring(0, tableMatch[0].indexOf('>'));
+      const innerXML = tableMatch[1]!;
 
-      const label = extractTagValueCI(tableBlock, 'title') || 'Mappa Sconosciuta';
-      const tagEndIdx = tableBlock.indexOf('>');
-      const tableTag = tableBlock.substring(0, tagEndIdx + 1);
-      const id = extractAttribute(tableTag, 'uniqueid') || `map_${Math.random().toString(36).substring(2, 9)}`;
+      const id = this.getAttr(tableTagBlock, 'uniqueid') || `map_${Math.random().toString(36).substring(2, 9)}`;
+      const label = this.getTagValue(innerXML, 'title') || 'Mappa Sconosciuta';
 
-      const lowerBlock = tableBlock.toLowerCase();
-      const zAxisStart = lowerBlock.indexOf('<xdfaxis id="z"');
-      if (zAxisStart === -1) continue;
-      const zAxisEnd = lowerBlock.indexOf('</xdfaxis>', zAxisStart);
-      if (zAxisEnd === -1) continue;
+      // Estrazione del corpo principale asse Z (I Dati Fisici)
+      const zAxis = this.extractAxis(innerXML, 'z');
+      if (!zAxis) continue;
 
-      const zAxisBody = tableBlock.substring(zAxisStart, zAxisEnd + 10);
-      const addressStr = extractAttribute(zAxisBody, 'm_address');
+      const addressStr = this.getAttr(zAxis, 'm_address');
       if (!addressStr) continue;
       
-      const rawOffset = addressStr.toLowerCase().startsWith('0x') ? parseInt(addressStr.substring(2), 16) : parseInt(addressStr, 10);
+      const rawOffset = this.parseNumeric(addressStr);
       if (isNaN(rawOffset)) continue;
 
-      const isPointer = zAxisBody.includes('<indexcode'); // Semplificazione euristica
+      const isPointer = /<indexcode/i.test(zAxis);
 
-      const bytesStr = extractAttribute(zAxisBody, 'm_bytes');
+      const bytesStr = this.getAttr(zAxis, 'm_bytes');
       const stride = bytesStr ? parseInt(bytesStr, 10) : 2;
 
-      const datatypeStr = extractTagValueCI(zAxisBody, 'datatype');
+      const datatypeStr = this.getTagValue(zAxis, 'datatype');
       const datatypeVal = datatypeStr ? parseInt(datatypeStr, 10) : 0;
-      const typeflagsStr = extractTagValueCI(zAxisBody, 'typeflags');
+      const typeflagsStr = this.getTagValue(zAxis, 'typeflags');
       const typeflagsVal = typeflagsStr ? parseInt(typeflagsStr, 16) : 0;
 
       const isSigned = datatypeVal === 1 || (typeflagsVal & 0x01) !== 0;
@@ -75,46 +103,40 @@ export class XdfParser {
       else if (stride === 2) dataType = isSigned ? 'int16' : 'uint16';
       else if (stride === 4) dataType = isSigned ? 'int32' : 'uint32';
 
-      // Parsing Equazione
-      let equation = 'x';
-      const mathStart = lowerBlock.indexOf('<math', zAxisStart);
-      if (mathStart !== -1 && mathStart < zAxisEnd) {
-        const mathEnd = lowerBlock.indexOf('</math>', mathStart);
-        if (mathEnd !== -1 && mathEnd < zAxisEnd) {
-          const mathBody = tableBlock.substring(mathStart, mathEnd + 7);
-          equation = extractAttribute(mathBody, 'equation') || 'x';
-        }
-      }
+      // Motore Estrazione Equazione Veloce
+      const mathMatch = /<math[^>]*>/i.exec(zAxis);
+      const equation = mathMatch ? (this.getAttr(mathMatch[0], 'equation') || 'x') : 'x';
 
-      // Estrazione Bitmask (EMBEDINFO)
+      // Motore Estrazione Bitmask (EMBEDINFO)
       let bitmask: number | undefined;
       let bitShift: number | undefined;
-      const embedStart = lowerBlock.indexOf('<embedinfo', zAxisStart);
-      if (embedStart !== -1 && embedStart < zAxisEnd) {
-         const embedEnd = lowerBlock.indexOf('>', embedStart);
-         const embedBody = tableBlock.substring(embedStart, embedEnd + 1);
-         const maskStr = extractAttribute(embedBody, 'wlbitmask') || extractAttribute(embedBody, 'mask');
-         const shiftStr = extractAttribute(embedBody, 'wlshift') || extractAttribute(embedBody, 'shift');
-         if (maskStr) bitmask = parseInt(maskStr, maskStr.toLowerCase().startsWith('0x') ? 16 : 10);
-         if (shiftStr) bitShift = parseInt(shiftStr, 10);
+      const embedMatch = /<embedinfo[^>]*>/i.exec(zAxis);
+      
+      if (embedMatch) {
+        const embedTag = embedMatch[0];
+        const maskStr = this.getAttr(embedTag, 'wlbitmask') || this.getAttr(embedTag, 'mask');
+        const shiftStr = this.getAttr(embedTag, 'wlshift') || this.getAttr(embedTag, 'shift');
+        if (maskStr) bitmask = this.parseNumeric(maskStr);
+        if (shiftStr) bitShift = parseInt(shiftStr, 10);
       }
 
-      // Estrazione Limiti (Min/Max)
-      const minStr = extractTagValueCI(zAxisBody, 'min');
-      const maxStr = extractTagValueCI(zAxisBody, 'max');
+      // Estrazione Limiti (Min/Max) Sicuri
+      const minStr = this.getTagValue(zAxis, 'min');
+      const maxStr = this.getTagValue(zAxis, 'max');
       const physMin = minStr ? parseFloat(minStr) : undefined;
       const physMax = maxStr ? parseFloat(maxStr) : undefined;
 
-      const swappedMatch = lowerBlock.indexOf('<swappedaxis') !== -1;
-      const xAxis = this.parseAxis('x', tableBlock);
-      const yAxis = this.parseAxis('y', tableBlock);
+      const swappedMatch = /<swappedaxis/i.test(innerXML);
+      const xAxis = this.parseAxisDefinition(innerXML, 'x');
+      const yAxis = this.parseAxisDefinition(innerXML, 'y');
 
+      // Controllo Limite Geometria contro la ROM reale
       if (!isPointer && rawOffset + (yAxis.size * xAxis.size * stride) > binarySize) continue;
 
       mapDefinitions.push({
         id,
         label,
-        unit: extractTagValueCI(zAxisBody, 'units') || 'RAW',
+        unit: this.getTagValue(zAxis, 'units') || 'RAW',
         offset: rawOffset,
         cols: xAxis.size,
         rows: yAxis.size,
@@ -134,24 +156,36 @@ export class XdfParser {
         yAxis: { label: yAxis.label, unit: yAxis.unit, values: yAxis.values }
       });
     }
+
     return mapDefinitions;
   }
 
-  private static parseAxis(axisId: 'x' | 'y', tableBody: string) {
-    const lowerBody = tableBody.toLowerCase();
-    const startTag = `<xdfaxis id="${axisId}"`;
-    const startIdx = lowerBody.indexOf(startTag);
-    if (startIdx === -1) return { label: axisId.toUpperCase(), unit: '', size: 8, values: Array.from({ length: 8 }, (_, i) => i * 10) };
-    const endTag = `</xdfaxis>`;
-    const endIdx = lowerBody.indexOf(endTag, startIdx);
-    if (endIdx === -1) return { label: axisId.toUpperCase(), unit: '', size: 8, values: Array.from({ length: 8 }, (_, i) => i * 10) };
+  /**
+   * Generatore Geometria Assi Esteso
+   */
+  private static parseAxisDefinition(xml: string, axisId: string): AxisDefinition & { size: number } {
+    const axisBlock = this.extractAxis(xml, axisId);
     
-    const axisBody = tableBody.substring(startIdx, endIdx + endTag.length);
-    const label = extractTagValueCI(axisBody, 'title') || axisId.toUpperCase();
-    const unit = extractTagValueCI(axisBody, 'units') || '';
-    const sizeStr = extractTagValueCI(axisBody, 'indexcount');
+    // Retrocompatibilità Assoluta: Se l'asse non esiste, genera geometria default 8x8 con delta x10
+    if (!axisBlock) {
+      return { 
+        label: axisId.toUpperCase(), 
+        unit: '', 
+        size: 8, 
+        values: Array.from({ length: 8 }, (_, i) => i * 10) 
+      };
+    }
+
+    const label = this.getTagValue(axisBlock, 'title') || axisId.toUpperCase();
+    const unit = this.getTagValue(axisBlock, 'units') || '';
+    const sizeStr = this.getTagValue(axisBlock, 'indexcount');
     const size = sizeStr ? parseInt(sizeStr, 10) : 8;
 
-    return { label, unit, size, values: Array.from({ length: size }, (_, i) => i) };
+    return {
+      label,
+      unit,
+      size,
+      values: Array.from({ length: size }, (_, i) => i) // Geometria Lineare Standard
+    };
   }
 }

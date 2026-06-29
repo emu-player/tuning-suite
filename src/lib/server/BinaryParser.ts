@@ -2,6 +2,10 @@ import type { MapDefinition, RawDataType, ParsedCell } from '@/types/calibration
 import { Endianness } from '@/types/calibration';
 import { CompuMethod } from './CompuMethod';
 
+// ============================================================================
+// STRUTTURE DATI OTTIMIZZATE & COSTANTI FISICHE
+// ============================================================================
+
 const BOUNDS: Record<RawDataType, { min: number; max: number }> = {
   float32: { min: -3.4028234663852886e38, max: 3.4028234663852886e38 },
   float64: { min: -Number.MAX_VALUE,      max: Number.MAX_VALUE },
@@ -13,47 +17,7 @@ const BOUNDS: Record<RawDataType, { min: number; max: number }> = {
   int32:   { min: -2147483648,            max: 2147483647 },
 };
 
-type ReaderFn = (view: DataView, offset: number, le: boolean) => number;
-type WriterFn = (view: DataView, offset: number, value: number, le: boolean) => void;
-
-const READERS: Record<RawDataType, ReaderFn> = {
-  float32: (v: DataView, o: number, le: boolean) => v.getFloat32(o, le),
-  float64: (v: DataView, o: number, le: boolean) => v.getFloat64(o, le),
-  uint8:   (v: DataView, o: number)              => v.getUint8(o),
-  int8:    (v: DataView, o: number)              => v.getInt8(o),
-  uint16:  (v: DataView, o: number, le: boolean) => v.getUint16(o, le),
-  int16:   (v: DataView, o: number, le: boolean) => v.getInt16(o, le),
-  uint32:  (v: DataView, o: number, le: boolean) => v.getUint32(o, le),
-  int32:   (v: DataView, o: number, le: boolean) => v.getInt32(o, le),
-};
-
-const BASE_WRITERS: Record<RawDataType, WriterFn> = {
-  float32: (v: DataView, o: number, val: number, le: boolean) => v.setFloat32(o, val, le),
-  float64: (v: DataView, o: number, val: number, le: boolean) => v.setFloat64(o, val, le),
-  uint8:   (v: DataView, o: number, val: number)              => v.setUint8(o, val),
-  int8:    (v: DataView, o: number, val: number)              => v.setInt8(o, val),
-  uint16:  (v: DataView, o: number, val: number, le: boolean) => v.setUint16(o, val, le),
-  int16:   (v: DataView, o: number, val: number, le: boolean) => v.setInt16(o, val, le),
-  uint32:  (v: DataView, o: number, val: number, le: boolean) => v.setUint32(o, val >>> 0, le),
-  int32:   (v: DataView, o: number, val: number, le: boolean) => v.setInt32(o, val, le),
-};
-
-const CLAMPED_WRITERS = {} as Record<RawDataType, WriterFn>;
-for (const key of Object.keys(BASE_WRITERS) as RawDataType[]) {
-  const b = BOUNDS[key];
-  const writer = BASE_WRITERS[key];
-  CLAMPED_WRITERS[key] = (view, offset, value, le) => {
-    const boundedVal = clamp(value, b.min, b.max);
-    writer(view, offset, boundedVal, le);
-  };
-}
-
-function clamp(value: number, min: number, max: number): number {
-  if (Number.isNaN(value)) return 0;
-  return value < min ? min : (value > max ? max : value);
-}
-
-function byteSize(t: RawDataType): number {
+function getStride(t: RawDataType): number {
   switch (t) {
     case 'uint8': case 'int8': return 1;
     case 'uint16': case 'int16': return 2;
@@ -63,111 +27,176 @@ function byteSize(t: RawDataType): number {
   }
 }
 
+// ============================================================================
+// CONTESTO PRE-COMPILATO (Per azzerare il Branching nei Loop)
+// ============================================================================
+
+interface MapContext {
+  baseOffset: number;
+  stride: number;
+  totalCells: number;
+  physMin: number;
+  physMax: number;
+  readRaw: (offset: number) => number;
+  writeRaw: (offset: number, val: number) => void;
+}
+
 export class BinaryParser {
   private readonly buffer: ArrayBuffer;
   private readonly view: DataView;
-  private readonly resolvedOffsets = new Map<string, number>();
+  private readonly byteLength: number;
+  
+  // Cache Veloce per i Contesti di Mappa (Evita ricalcoli su letture/scritture multiple)
+  private readonly contextCache = new Map<string, MapContext>();
 
   constructor(buffer: ArrayBuffer) {
     this.buffer = buffer;
     this.view = new DataView(buffer);
+    this.byteLength = buffer.byteLength;
   }
 
-  private resolveOffset(def: MapDefinition): number {
-    const cached = this.resolvedOffsets.get(def.id);
-    if (cached !== undefined) return cached;
+  /**
+   * Generatore di Contesto JIT:
+   * Risolve puntatori, calcola limiti, e prepara funzioni di I/O "curried"
+   * senza condizionali interni, garantendo la Monomorphic Inline Caching in V8.
+   */
+  private getContext(def: MapDefinition): MapContext {
+    let ctx = this.contextCache.get(def.id);
+    if (ctx) return ctx;
 
-    let offset = def.offset;
+    // 1. Risoluzione Puntatori
+    let baseOffset = def.offset;
+    const le = def.endianness === Endianness.LittleEndian;
+    
     if (def.isPointer) {
-      if (offset + 4 > this.buffer.byteLength || offset < 0) {
-        throw new RangeError(`Pointer offset 0x${offset.toString(16)} for map "${def.id}" is outside binary bounds.`);
+      if (baseOffset + 4 > this.byteLength || baseOffset < 0) {
+        throw new RangeError(`Pointer offset 0x${baseOffset.toString(16)} out of bounds.`);
       }
-      const le = def.endianness === Endianness.LittleEndian;
-      offset = this.view.getUint32(offset, le);
-      if (offset < 0 || offset > this.buffer.byteLength) {
-        throw new RangeError(`Pointer at 0x${def.offset.toString(16)} resolved to out-of-bounds address: 0x${offset.toString(16)}.`);
+      baseOffset = this.view.getUint32(baseOffset, le);
+      if (baseOffset < 0 || baseOffset > this.byteLength) {
+        throw new RangeError(`Resolved pointer 0x${baseOffset.toString(16)} out of bounds.`);
       }
     }
-    
-    this.resolvedOffsets.set(def.id, offset);
-    return offset;
-  }
 
-  parseMap(def: MapDefinition): ParsedCell[] {
-    const stride = byteSize(def.dataType);
-    const le = def.endianness === Endianness.LittleEndian;
-    const baseOffset = this.resolveOffset(def);
-    const rows = def.rows;
-    const cols = def.cols;
-    const totalCells = rows * cols;
-    const byteLength = this.buffer.byteLength;
+    const stride = getStride(def.dataType);
+    const totalCells = def.rows * def.cols;
 
-    if (baseOffset < 0 || baseOffset + totalCells * stride > byteLength) {
+    if (baseOffset < 0 || baseOffset + totalCells * stride > this.byteLength) {
       throw new RangeError(`Map "${def.id}" layout overflows binary bounds.`);
     }
 
-    const cells: ParsedCell[] = new Array(totalCells);
-    const view = this.view;
-    const swappedAxes = def.swappedAxes;
+    // 2. Fusione dei Limiti (Clamping Matematico Unificato)
+    const typeBounds = BOUNDS[def.dataType];
+    const physMin = def.physMin !== undefined ? Math.max(def.physMin, typeBounds.min) : typeBounds.min;
+    const physMax = def.physMax !== undefined ? Math.min(def.physMax, typeBounds.max) : typeBounds.max;
 
-    const isSigned = def.dataType.startsWith('int');
-    const hasBitmask = def.bitmask !== undefined && def.bitShift !== undefined;
-    const bitmask = def.bitmask ?? 0;
-    const bitShift = def.bitShift ?? 0;
-    
-    const maskVal = hasBitmask ? (bitmask >>> bitShift) : 0;
-    const bitWidth = hasBitmask && maskVal > 0 ? (32 - Math.clz32(maskVal)) : 0;
-    const signMask = 1 << (bitWidth - 1);
+    // 3. Costruzione Funzioni Native DataView (High-Speed Accessors)
+    const v = this.view;
+    let baseRead: (o: number) => number;
+    let baseWrite: (o: number, val: number) => void;
 
-    const reader = READERS[def.dataType] || READERS['uint8'];
+    switch (def.dataType) {
+      case 'float32': baseRead = (o) => v.getFloat32(o, le); baseWrite = (o, val) => v.setFloat32(o, val, le); break;
+      case 'float64': baseRead = (o) => v.getFloat64(o, le); baseWrite = (o, val) => v.setFloat64(o, val, le); break;
+      case 'uint8':   baseRead = (o) => v.getUint8(o);       baseWrite = (o, val) => v.setUint8(o, val);       break;
+      case 'int8':    baseRead = (o) => v.getInt8(o);        baseWrite = (o, val) => v.setInt8(o, val);        break;
+      case 'uint16':  baseRead = (o) => v.getUint16(o, le);  baseWrite = (o, val) => v.setUint16(o, val, le);  break;
+      case 'int16':   baseRead = (o) => v.getInt16(o, le);   baseWrite = (o, val) => v.setInt16(o, val, le);   break;
+      case 'uint32':  baseRead = (o) => v.getUint32(o, le);  baseWrite = (o, val) => v.setUint32(o, val >>> 0, le); break;
+      case 'int32':   baseRead = (o) => v.getInt32(o, le);   baseWrite = (o, val) => v.setInt32(o, val, le);   break;
+      default:        baseRead = (o) => v.getUint8(o);       baseWrite = (o, val) => v.setUint8(o, val);
+    }
 
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < cols; col++) {
-        const cellIndex = swappedAxes ? (col * rows + row) : (row * cols + col);
+    // 4. Wrapping per Logica Bitmask & Segno (Decoratore Pattern)
+    let finalRead = baseRead;
+    let finalWrite = baseWrite;
+
+    if (def.bitmask !== undefined && def.bitShift !== undefined) {
+      const bitmask = def.bitmask;
+      const bitShift = def.bitShift;
+      const isSigned = def.dataType.startsWith('int');
+      const maskVal = bitmask >>> bitShift;
+      const bitWidth = maskVal > 0 ? (32 - Math.clz32(maskVal)) : 0;
+      const signMask = 1 << (bitWidth - 1);
+
+      // Lettura decorata (Shift & Sign Extension)
+      finalRead = (o: number) => {
+        let raw = baseRead(o);
+        raw = (raw & bitmask) >>> bitShift;
+        if (isSigned && (raw & signMask)) raw = raw | (~0 << bitWidth);
+        return raw;
+      };
+
+      // Scrittura decorata (Read-Modify-Write atomico simulato)
+      finalWrite = (o: number, val: number) => {
+        const existing = baseRead(o);
+        const clampedRaw = val & maskVal;
+        const finalValue = (existing & ~bitmask) | ((clampedRaw << bitShift) & bitmask);
+        baseWrite(o, finalValue);
+      };
+    } else {
+      // Clamping Nativo per tipi standard
+      finalWrite = (o: number, val: number) => {
+        const safeVal = Number.isNaN(val) ? 0 : (val < typeBounds.min ? typeBounds.min : (val > typeBounds.max ? typeBounds.max : val));
+        baseWrite(o, safeVal);
+      };
+    }
+
+    ctx = { baseOffset, stride, totalCells, physMin, physMax, readRaw: finalRead, writeRaw: finalWrite };
+    this.contextCache.set(def.id, ctx);
+    return ctx;
+  }
+
+  // ============================================================================
+  // PUBBLICHE: ESECUZIONE BRANCHLESS (O(N) Puro)
+  // ============================================================================
+
+  public parseMap(def: MapDefinition): ParsedCell[] {
+    const ctx = this.getContext(def);
+    const { cols, rows, swappedAxes } = def;
+    const { baseOffset, stride, totalCells, readRaw } = ctx;
+
+    // Pre-allocazione esatta array (Zero resizes)
+    const cells = new Array<ParsedCell>(totalCells);
+    let idx = 0;
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        // Calcolo indice e offset puro
+        const cellIndex = swappedAxes ? (c * rows + r) : (r * cols + c);
         const byteOffset = baseOffset + cellIndex * stride;
-        let raw = reader(view, byteOffset, le);
-
-        if (hasBitmask) {
-          raw = (raw & bitmask) >>> bitShift;
-          if (isSigned && (raw & signMask)) raw = raw | (~0 << bitWidth);
-        }
-
-        const physicalValue = CompuMethod.rawToPhysical(raw, def);
-        cells[row * cols + col] = { col, row, physical: physicalValue };
+        
+        // Esecuzione tramite funzioni monomorfiche JITtate
+        const raw = readRaw(byteOffset);
+        const physical = CompuMethod.rawToPhysical(raw, def);
+        
+        cells[idx++] = { col: c, row: r, physical };
       }
     }
+
     return cells;
   }
 
-  writeCell(def: MapDefinition, col: number, row: number, newPhysical: number): void {
-    const min = def.physMin ?? -Infinity;
-    const max = def.physMax ?? Infinity;
-    const clampedPhysical = clamp(newPhysical, min, max);
+  public writeCell(def: MapDefinition, col: number, row: number, newPhysical: number): void {
+    const ctx = this.getContext(def);
+    
+    // Clamping Matematico Ultra-Veloce
+    let clampedPhys = newPhysical;
+    if (Number.isNaN(clampedPhys)) clampedPhys = 0;
+    if (clampedPhys < ctx.physMin) clampedPhys = ctx.physMin;
+    else if (clampedPhys > ctx.physMax) clampedPhys = ctx.physMax;
 
-    const stride = byteSize(def.dataType);
-    const le = def.endianness === Endianness.LittleEndian;
-    const baseOffset = this.resolveOffset(def);
-
+    // Conversione inversa e calcolo Offset
+    const newRaw = CompuMethod.physicalToRaw(clampedPhys, def);
     const cellIndex = def.swappedAxes ? (col * def.rows + row) : (row * def.cols + col);
-    const byteOffset = baseOffset + cellIndex * stride;
+    const byteOffset = ctx.baseOffset + cellIndex * ctx.stride;
 
-    if (byteOffset + stride > this.buffer.byteLength) {
-      throw new RangeError(`Write offset 0x${byteOffset.toString(16)} overflows binary.`);
+    // Boundary Check Estremo di Sicurezza
+    if (byteOffset + ctx.stride > this.byteLength) {
+      throw new RangeError(`Write boundary violation at 0x${byteOffset.toString(16)}`);
     }
 
-    const newRaw = CompuMethod.physicalToRaw(clampedPhysical, def);
-    const view = this.view;
-    const writer = CLAMPED_WRITERS[def.dataType] || CLAMPED_WRITERS['uint8'];
-
-    if (def.bitmask !== undefined && def.bitShift !== undefined) {
-      const reader = READERS[def.dataType] || READERS['uint8'];
-      const existing = reader(view, byteOffset, le);
-      const maxMaskValue = def.bitmask >>> def.bitShift;
-      const clampedRaw = newRaw & maxMaskValue;
-      const finalValue = (existing & ~def.bitmask) | ((clampedRaw << def.bitShift) & def.bitmask);
-      writer(view, byteOffset, finalValue, le);
-    } else {
-      writer(view, byteOffset, newRaw, le);
-    }
+    // Scrittura Pura Branchless
+    ctx.writeRaw(byteOffset, newRaw);
   }
 }
